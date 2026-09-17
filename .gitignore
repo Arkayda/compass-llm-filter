@@ -7,3 +7,6 @@ build/
 .pytest_cache/
 node_modules/
 console-dist/
+
+# внутренняя документация — не публикуется
+INTERNAL.md
