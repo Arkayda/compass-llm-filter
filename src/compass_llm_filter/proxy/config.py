@@ -22,6 +22,7 @@ class Settings:
     max_body_bytes: int = 10 * 1024 * 1024
     entities_header: str = "x-compass-entities"
     custom_rules_file: str = ""      # опционально: файл со своими правилами при старте
+    state_file: str = ""             # опционально: JSON-файл состояния (настройки+правила)
     auth_user: str = ""              # basic-auth консоли/управляющего API (оба или ничего)
     auth_password: str = ""
 
@@ -40,6 +41,7 @@ class Settings:
             max_body_bytes=int(env.get("COMPASS_MAX_BODY_BYTES", str(10 * 1024 * 1024))),
             entities_header=env.get("COMPASS_ENTITIES_HEADER", "x-compass-entities").lower(),
             custom_rules_file=env.get("COMPASS_CUSTOM_RULES_FILE", ""),
+            state_file=env.get("COMPASS_STATE_FILE", ""),
             auth_user=env.get("COMPASS_AUTH_USER", ""),
             auth_password=env.get("COMPASS_AUTH_PASSWORD", ""),
         )

@@ -2,11 +2,13 @@
 fail-closed, entities-заголовок, правила, аудит, метрики. Апстрим — мок."""
 import base64
 import json
+import pathlib
 
 import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient, MockTransport
 
+from compass_llm_filter import Anonymizer
 from compass_llm_filter.proxy.app import create_app
 from compass_llm_filter.proxy.config import Settings
 
@@ -279,3 +281,103 @@ async def test_console_basic_auth():
         resp = await client.post("/chat/completions", json=chat_payload(f"тел {PHONE}"))
     assert resp.status_code == 200
     assert PHONE not in seen[0]["body"]["messages"][0]["content"]
+
+
+def sse_upstream(seen: list, content=None, split_at=8):
+    """SSE-апстрим: эхо замаскированного текста пользователя дельтами,
+    разрезая его в произвольном месте (фейк окажется разбит по дельтам)."""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        text = content if content is not None else next(
+            m["content"] for m in payload.get("messages", []) if m["role"] == "user")
+        seen.append(text)
+        deltas = [text[:split_at], text[split_at:2 * split_at], text[2 * split_at:]]
+        body = "".join(
+            "data: " + json.dumps({"choices": [{"delta": {"content": d}, "index": 0}]}) + "\n\n"
+            for d in deltas if d) + "data: [DONE]\n\n"
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                              content=body.encode())
+    return MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_sse_stream_restores_split_fakes():
+    seen = []
+    app = create_app(make_settings(), upstream_transport=sse_upstream(seen))
+    async with AsyncClient(transport=ASGITransport(app=app),
+                           base_url="http://compass.test") as client:
+        resp = await client.post(
+            "/chat/completions",
+            headers={"X-Compass-Entities": json.dumps(["Иванов Пётр"])},
+            json=chat_payload("Иванов Пётр ждёт звонка на +7 912 345-67-89"))
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers["content-type"]
+        body = resp.text
+    assert "[DONE]" in body
+    # апстрим получил маскированный текст — оригиналов нет
+    assert "Иванов Пётр" not in seen[0] and "+7 912 345-67-89" not in seen[0]
+    # клиент получил оригиналы, склеенные из нескольких дельт
+    assert "Иванов Пётр" in body and "+7 912 345-67-89" in body
+
+
+@pytest.mark.asyncio
+async def test_sse_passthrough_lines_and_done():
+    seen = []
+    lines = ("event: message\n\n"
+             ": keep-alive\n\n"
+             "data: {\"choices\":[{\"delta\":{\"content\":\"Ива\"}}]}\n\n"
+             "data: {\"choices\":[{\"delta\":{\"content\":\"!\"}}]}\n\n"
+             "data: [DONE]\n\n")
+
+    def raw_upstream(request):
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                              content=lines.encode())
+    app = create_app(make_settings(), upstream_transport=MockTransport(raw_upstream))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        resp = await client.post("/chat/completions", json=chat_payload("просто текст"))
+        body = resp.text
+    assert "event: message" in body and ": keep-alive" in body
+    assert body.count("data: [DONE]") == 1
+    assert "Ива!" in body  # контент без PII проходит без изменений
+
+
+def test_sse_restorer_holds_fake_prefix():
+    from compass_llm_filter.proxy.app import SSERestorer
+    anon = Anonymizer()
+    anon.register_entity("Иванов Пётр")
+    masked = anon.sanitize_string("Иванов Пётр пришёл")  # фейк-имя в тексте
+    fake = masked.split()[0] + " " + masked.split()[1]
+    r = SSERestorer(anon)
+    first = r.feed_bytes(
+        ("data: " + json.dumps({"delta": fake[:len(fake) // 2]}) + "\n\n").encode())
+    first_content = json.loads(first.decode().split("data: ", 1)[1].strip())["delta"]
+    second = r.feed_bytes(
+        ("data: " + json.dumps({"delta": fake[len(fake) // 2:] + " пришёл"}) + "\n\n").encode())
+    second_content = json.loads(second.decode().split("data: ", 1)[1].strip())["delta"]
+    # первая дельта не выпустила полу-фейк, вторая вернула оригинал целиком
+    assert first_content == ""
+    assert "Иванов Пётр" in second_content
+    assert fake not in second_content
+
+
+@pytest.mark.asyncio
+async def test_state_file_survives_restart(tmp_path):
+    sf = str(tmp_path / "state.json")
+    async with make_client(make_settings(state_file=sf), []) as client:
+        await client.put("/v1/settings", json={"mode": "detect"})
+        await client.post("/v1/rules", json={"name": "Заказ", "pattern": "ORD-\\d{3}"})
+    assert pathlib.Path(sf).exists()
+    async with make_client(make_settings(state_file=sf), []) as client:
+        settings = (await client.get("/v1/settings")).json()
+        rules = (await client.get("/v1/rules")).json()["rules"]
+    assert settings["mode"] == "detect"
+    assert any(r["pattern"] == "ORD-\\d{3}" for r in rules)
+
+
+@pytest.mark.asyncio
+async def test_detectors_catalog():
+    async with make_client(make_settings(), []) as client:
+        resp = await client.get("/v1/detectors")
+        assert resp.status_code == 200
+        ids = [d["id"] for d in resp.json()["detectors"]]
+    assert "ibans" in ids and "secrets" in ids and "custom" in ids

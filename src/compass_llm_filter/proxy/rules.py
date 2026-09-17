@@ -1,12 +1,14 @@
 """Рабочее состояние прокси: настройки, кастомные правила, аудит.
 
-Всё в памяти одного процесса — вместе с картой подстановок это часть
-проекта: оригиналы не переживают запрос, состояние не переживает
-рестарт (свои правила при желании грузятся из файла при старте).
+По умолчанию всё в памяти одного процесса — вместе с картой подстановок это
+часть проекта: оригиналы не переживают запрос. COMPASS_STATE_FILE добавляет
+выживание настроек и правил через рестарт (JSON-файл, пишется при каждом
+изменении, читается при старте после env-значений).
 """
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 import uuid
@@ -62,6 +64,12 @@ class CustomRule:
 class State:
     """Настройки (меняются через API), правила, аудит, метрики."""
 
+    _SETTING_VALUES = {
+        "mode": ("enforce", "detect"),
+        "fail_mode": ("closed", "open"),
+        "anonymization_mode": ("fake", "placeholders"),
+    }
+
     def __init__(self, settings: Settings):
         self.settings = settings
         self.mode = settings.mode
@@ -71,6 +79,48 @@ class State:
         self.audit: deque[dict] = deque(maxlen=settings.audit_max_entries)
         if settings.custom_rules_file:
             self._load_rules_file(settings.custom_rules_file)
+        if settings.state_file:
+            self._load_state_file(settings.state_file)
+
+    def _load_rules_file(self, path: str) -> None:
+        with open(path, encoding="utf-8") as f:
+            for item in json.load(f):
+                self.add_rule(item)
+
+    def _load_state_file(self, path: str) -> None:
+        """Настройки+правила из файла состояния (после env-значений)."""
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return
+        for key, allowed in self._SETTING_VALUES.items():
+            value = (data.get("settings") or {}).get(key)
+            if value in allowed:
+                setattr(self, key, value)
+        for item in data.get("rules") or []:
+            try:
+                self.add_rule(item)
+            except ValueError:
+                continue
+
+    def save_state(self) -> None:
+        """Записать настройки+правила в файл состояния. Ошибки IO не роняют
+        запрос (состояние в памяти уже изменено) — рестарт просто вернёт
+        прежние значения."""
+        if not self.settings.state_file:
+            return
+        data = {
+            "settings": self.public_settings(),
+            "rules": [r.public() for r in self.rules.values()],
+        }
+        tmp = self.settings.state_file + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, self.settings.state_file)
+        except OSError:
+            pass
 
     def _load_rules_file(self, path: str) -> None:
         with open(path, encoding="utf-8") as f:
