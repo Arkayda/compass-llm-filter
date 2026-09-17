@@ -49,8 +49,10 @@ bash demo.sh
 ```sh
 docker build -t compass-llm-filter -f docker/Dockerfile .
 docker run --rm -p 8080:8080 \
-  -e COMPASS_UPSTREAM_BASE_URL=https://open.bigmodel.cn/api/paas/v4 \
+  -e COMPASS_UPSTREAM_BASE_URL=https://api.z.ai/api/coding/paas/v4 \
   compass-llm-filter
+# другие варианты: https://open.bigmodel.cn/api/paas/v4,
+# https://api.z.ai/api/paas/v4, https://api.openai.com/v1
 ```
 
 Пример запроса:
