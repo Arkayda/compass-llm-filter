@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compass — LLM-фильтр</title>
+<link rel="icon" type="image/svg+xml" href="/logo.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  /* палитра и стиль — как у фронтенда Inception (tailwind.config.js) */
+  :root {
+    --surface: #F8FAFE; --card: #FFFFFF; --border: #E8ECF1; --muted: #B0B8C4;
+    --gray50: #F9FAFB; --gray100: #F3F4F6; --gray200: #E5E7EB;
+    --gray600: #4B5563; --gray700: #374151; --text: #1F2937;
+    --p50: #F0F6FD; --p100: #DCE9F9; --p300: #96BDED; --p400: #6B9FD6;
+    --p500: #5A8EC5; --p600: #4A7DB4;
+    --ok-bg: rgba(123,198,126,.2);  --ok-tx: #15803D;
+    --warn-bg: rgba(240,210,100,.25); --warn-tx: #A16207;
+    --bad-bg: rgba(224,123,123,.2); --bad-tx: #B91C1C;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--surface); color: var(--text);
+         font: 14px/1.5 Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+         -webkit-font-smoothing: antialiased; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+
+  .app { display: flex; min-height: 100vh; }
+
+  /* сайдбар — как в Inception */
+  .side { width: 232px; flex-shrink: 0; background: var(--card);
+          border-right: 1px solid var(--border); box-shadow: 0 1px 3px rgba(0,0,0,.06);
+          display: flex; flex-direction: column; }
+  .side .logo { padding: 18px 20px; border-bottom: 1px solid var(--border); }
+  .side .logo img { height: 26px; width: auto; display: block; }
+  .side .sec { padding: 14px 20px 6px; font-size: 11px; font-weight: 500; color: var(--muted);
+               text-transform: uppercase; letter-spacing: .05em; }
+  .side nav { padding: 0 12px; flex: 1; }
+  .side nav button {
+    display: flex; align-items: center; gap: 8px; width: 100%; text-align: left;
+    background: none; border: none; cursor: pointer; font: inherit; font-size: 14px;
+    color: var(--gray600); padding: 8px 12px; border-radius: 8px; margin-bottom: 2px;
+    transition: background .15s, color .15s;
+  }
+  .side nav button:hover { background: var(--gray50); }
+  .side nav button.active { background: var(--p50); color: var(--p600); font-weight: 500; }
+  .side nav button svg { flex-shrink: 0; }
+  .side .foot { padding: 14px 16px; border-top: 1px solid var(--border);
+                font-size: 12px; color: var(--muted); line-height: 1.6; word-break: break-word; }
+
+  .main { flex: 1; padding: 28px 32px 48px; max-width: 1080px; }
+
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+          box-shadow: 0 1px 3px rgba(0,0,0,.06); padding: 20px; margin-bottom: 16px; }
+  .card h2 { font-size: 14px; font-weight: 600; margin-bottom: 14px; }
+  .card-h { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+  .card-h h2 { margin-bottom: 0; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .stat { background: var(--gray50); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+  .stat .v { font-size: 22px; font-weight: 600; }
+  .stat .k { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  label { display: block; color: var(--gray600); font-size: 12px; margin: 12px 0 4px; }
+  select, input[type=text], textarea {
+    width: 100%; background: var(--card); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 8px 10px; font-size: 13px; font-family: inherit; outline: none;
+    transition: border-color .15s;
+  }
+  select:focus, input[type=text]:focus, textarea:focus { border-color: var(--p300); }
+  textarea { font-family: var(--mono); min-height: 110px; resize: vertical; }
+  .row { display: flex; gap: 12px; }
+  .row > * { flex: 1; }
+  .btn {
+    background: var(--p400); color: #fff; border: none; border-radius: 4px; padding: 8px 16px;
+    font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; margin-top: 12px;
+    transition: background .15s;
+  }
+  .btn:hover { background: var(--p500); }
+  .btn.ghost { background: var(--gray100); color: var(--gray700); border: 1px solid var(--border); }
+  .btn.ghost:hover { background: var(--gray200); }
+  .btn.small { padding: 4px 10px; font-size: 12px; margin: 0; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 500; }
+  .pill.ok { background: var(--ok-bg); color: var(--ok-tx); }
+  .pill.bad { background: var(--bad-bg); color: var(--bad-tx); }
+  .pill.warn { background: var(--warn-bg); color: var(--warn-tx); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; background: var(--gray50); color: var(--muted); font-weight: 500;
+       font-size: 11px; text-transform: uppercase; letter-spacing: .03em;
+       padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  td { padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  td.mono { font-family: var(--mono); font-size: 12px; }
+  .out { background: var(--gray50); border: 1px solid var(--border); border-radius: 6px; padding: 12px;
+         font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-word; margin-top: 4px; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 14px 0; }
+  code { font-family: var(--mono); background: var(--gray50); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+
+  @media (max-width: 720px) {
+    .app { flex-direction: column; }
+    .side { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
+    .side nav { display: flex; overflow-x: auto; padding: 8px 12px; gap: 4px; }
+    .side nav button { width: auto; white-space: nowrap; }
+    .main { padding: 20px 16px 40px; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="logo"><img src="/logo.svg" alt="Compass"></div>
+    <div class="sec">Разделы</div>
+    <nav>
+      <button data-tab="overview" class="active">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+        Обзор
+      </button>
+      <button data-tab="rules">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 3v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5z"/></svg>
+        Правила
+      </button>
+      <button data-tab="sandbox">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v6.3L4.6 18a2 2 0 0 0 1.8 3h11.2a2 2 0 0 0 1.8-3L14 8.3V2"/><path d="M8.5 2h7"/><path d="M7 14h10"/></svg>
+        Песочница
+      </button>
+      <button data-tab="audit">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
+        Аудит
+      </button>
+    </nav>
+    <div class="foot"><div id="upstream-info"></div></div>
+  </aside>
+  <main class="main">
+
+  <!-- ОБЗОР -->
+  <section id="tab-overview">
+    <div class="card">
+      <h2>Режим работы</h2>
+      <div class="row">
+        <div>
+          <label>Режим</label>
+          <select id="set-mode">
+            <option value="enforce">enforce — маскировать трафик</option>
+            <option value="detect">detect — только считать (shadow)</option>
+          </select>
+        </div>
+        <div>
+          <label>Поведение при сбое маскирования</label>
+          <select id="set-fail">
+            <option value="closed">closed — блокировать запрос (503)</option>
+            <option value="open">open — пропускать как есть</option>
+          </select>
+        </div>
+        <div>
+          <label>Подстановки</label>
+          <select id="set-anon">
+            <option value="fake">fake — реалистичные</option>
+            <option value="placeholders">placeholders — [PHONE] и т.п.</option>
+          </select>
+        </div>
+      </div>
+      <button class="btn" onclick="saveSettings()">Применить</button>
+      <span class="hint">Меняется на лету, без перезапуска — PUT /v1/settings</span>
+    </div>
+    <div class="card">
+      <h2>Срабатывания по типам</h2>
+      <div class="grid" id="overview-stats"><div class="empty">нет данных — прогоните трафик</div></div>
+    </div>
+  </section>
+
+  <!-- ПРАВИЛА -->
+  <section id="tab-rules" hidden>
+    <div class="card">
+      <h2>Новое правило</h2>
+      <div class="row">
+        <div><label>Название</label><input type="text" id="rule-name" placeholder="Внутренний номер заказа"></div>
+        <div><label>Regex (python)</label><input type="text" id="rule-pattern" placeholder="ORD-\d{6}"></div>
+      </div>
+      <div class="row">
+        <div>
+          <label>Замена</label>
+          <select id="rule-replacement">
+            <option value="fake">fake — мусор той же формы</option>
+            <option value="placeholder">placeholder</option>
+          </select>
+        </div>
+        <div><label>Плейсхолдер (если выбран)</label><input type="text" id="rule-placeholder" value="[ORDER]"></div>
+      </div>
+      <button class="btn" onclick="addRule()">Добавить правило</button>
+    </div>
+    <div class="card">
+      <h2>Свои правила</h2>
+      <table><thead><tr><th>Название</th><th>Regex</th><th>Замена</th><th>Вкл</th><th></th></tr></thead>
+      <tbody id="rules-body"><tr><td colspan="5" class="empty">правил пока нет</td></tr></tbody></table>
+    </div>
+  </section>
+
+  <!-- ПЕСОЧНИЦА -->
+  <section id="tab-sandbox" hidden>
+    <div class="card">
+      <h2>Песочница</h2>
+      <label>Текст (как в сообщении клиента)</label>
+      <textarea id="sb-text">Клиент ООО Ромашка, тел +7 912 345-67-89, карта 4111 1111 1111 1111,
+напишите на ivan.ivanov@romashka.ru, ключ sk-proj-abcdef1234567890abcdef</textarea>
+      <label>Известные сущности (JSON-массив; аналог заголовка X-Compass-Entities)</label>
+      <input type="text" id="sb-entities" value='["ООО Ромашка"]'>
+      <button class="btn" onclick="runSandbox()">Проверить</button>
+      <label>Что увидит провайдер</label>
+      <div class="out" id="sb-masked">—</div>
+      <label>Что вернётся клиенту (после восстановления)</label>
+      <div class="out" id="sb-restored">—</div>
+      <div class="hint" id="sb-stats"></div>
+    </div>
+  </section>
+
+  <!-- АУДИТ -->
+  <section id="tab-audit" hidden>
+    <div class="card">
+      <div class="card-h">
+        <h2>Журнал запросов</h2>
+        <button class="btn ghost small" onclick="loadAudit()">Обновить</button>
+      </div>
+      <table><thead><tr><th>Время</th><th>Путь</th><th>Режим</th><th>Найдено</th><th>Сущн.</th><th>Статус</th></tr></thead>
+      <tbody id="audit-body"><tr><td colspan="6" class="empty">записей нет</td></tr></tbody></table>
+    </div>
+  </section>
+
+  </main>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+document.querySelectorAll('nav button').forEach(btn => btn.onclick = () => {
+  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  ['overview','rules','sandbox','audit'].forEach(t => $('tab-' + t).hidden = t !== btn.dataset.tab);
+  if (btn.dataset.tab === 'audit') loadAudit();
+});
+
+async function api(path, opts) {
+  const resp = await fetch(path, opts && {headers: {'Content-Type': 'application/json'}, ...opts});
+  return resp.json();
+}
+
+async function loadOverview() {
+  try {
+    const health = await api('/healthz');
+    $('upstream-info').textContent = health.upstream + ' · режим: ' + health.mode;
+    $('set-mode').value = health.mode; $('set-fail').value = health.fail_mode;
+    $('set-anon').value = health.anonymization_mode;
+    const metrics = await (await fetch('/metrics')).text();
+    const stats = {};
+    metrics.split('\n').forEach(line => {
+      const m = line.match(/^compass_masked_total\{type="(\w+)"\} (\d+)$/);
+      if (m && +m[2] > 0) stats[m[1]] = +m[2];
+    });
+    const titles = {phones:'Телефоны', cards:'Карты', emails:'E-mail', links:'Ссылки',
+      domains:'Домены', ips:'IP-адреса', names:'Имена', mentions:'@упоминания',
+      snils:'СНИЛС', inns:'ИНН', inns12:'ИНН-12', ogrns:'ОГРН', ogrnips:'ОГРНИП',
+      passports:'Паспорта', secrets:'Секреты', custom:'Свои правила'};
+    const grid = Object.entries(stats).map(([k, v]) =>
+      `<div class="stat"><div class="v">${v}</div><div class="k">${titles[k] || k}</div></div>`).join('');
+    $('overview-stats').innerHTML = grid || '<div class="empty">нет данных — прогоните трафик</div>';
+  } catch (e) { console.error(e); }
+}
+
+async function saveSettings() {
+  await api('/v1/settings', {method: 'PUT', body: JSON.stringify({
+    mode: $('set-mode').value, fail_mode: $('set-fail').value,
+    anonymization_mode: $('set-anon').value})});
+  loadOverview();
+}
+
+async function loadRules() {
+  const data = await api('/v1/rules');
+  const body = $('rules-body');
+  if (!data.rules.length) { body.innerHTML = '<tr><td colspan="5" class="empty">правил пока нет</td></tr>'; return; }
+  body.innerHTML = data.rules.map(r => `<tr>
+    <td>${esc(r.name)}</td><td class="mono">${esc(r.pattern)}</td>
+    <td>${r.replacement === 'fake' ? 'fake' : esc(r.placeholder)}</td>
+    <td><span class="pill ${r.enabled ? 'ok' : 'warn'}">${r.enabled ? 'вкл' : 'выкл'}</span></td>
+    <td>
+      <button class="btn ghost small" onclick="toggleRule('${r.id}', ${!r.enabled})">${r.enabled ? 'выключить' : 'включить'}</button>
+      <button class="btn ghost small" onclick="deleteRule('${r.id}')">удалить</button>
+    </td></tr>`).join('');
+}
+
+async function addRule() {
+  await api('/v1/rules', {method: 'POST', body: JSON.stringify({
+    name: $('rule-name').value, pattern: $('rule-pattern').value,
+    replacement: $('rule-replacement').value, placeholder: $('rule-placeholder').value})});
+  loadRules();
+}
+
+async function toggleRule(id, enabled) {
+  await api('/v1/rules/' + id, {method: 'PATCH', body: JSON.stringify({enabled})}); loadRules();
+}
+async function deleteRule(id) {
+  await api('/v1/rules/' + id, {method: 'DELETE'}); loadRules();
+}
+
+async function runSandbox() {
+  let entities = [];
+  try { entities = JSON.parse($('sb-entities').value || '[]'); } catch (e) {}
+  const data = await api('/v1/sandbox', {method: 'POST', body: JSON.stringify({
+    text: $('sb-text').value, entities})});
+  $('sb-masked').textContent = data.masked || '—';
+  $('sb-restored').textContent = data.restored || '—';
+  $('sb-stats').innerHTML = 'замены: ' + esc(JSON.stringify(data.stats)) +
+    ' · утечки: ' + (data.leaks === 0
+      ? '<span class="pill ok">0 — чисто</span>'
+      : `<span class="pill bad">${data.leaks} — маскирование не удалось</span>`);
+}
+
+async function loadAudit() {
+  const data = await api('/v1/audit/records');
+  const body = $('audit-body');
+  if (!data.records.length) { body.innerHTML = '<tr><td colspan="6" class="empty">записей нет</td></tr>'; return; }
+  body.innerHTML = data.records.slice().reverse().map(r => `<tr>
+    <td class="mono">${new Date(r.ts * 1000).toLocaleTimeString('ru-RU')}</td>
+    <td class="mono">${esc(r.path)}</td>
+    <td>${esc(r.mode || '—')}</td>
+    <td class="mono">${r.detected ? Object.entries(r.detected).map(([k, v]) => k + ':' + v).join(' ') : '—'}</td>
+    <td class="mono">${r.entities ?? '—'}</td>
+    <td>${r.blocked ? '<span class="pill bad">заблокирован</span>' : '<span class="pill ok">ок</span>'}</td>
+  </tr>`).join('');
+}
+
+loadOverview(); loadRules();
+setInterval(loadOverview, 5000);
+</script>
+</body>
+</html>
