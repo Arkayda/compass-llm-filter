@@ -1,10 +1,9 @@
-"""Каталог секретов: API-ключи, токены, приватные ключи, пароли в конфигах.
+"""Секреты: API-ключи, токены, приватные ключи, пары «метка: значение».
 
-Отдельная категория PII: сами по себе строки не «персональны», но их утечка в
-LLM-провайдер недопустима. Правила — про префиксы и формы известных ключей;
-для пар присваивания (api_key=..., password:...) заменяется только значение,
-метка остаётся читаемой. Замена — детерминированный мусор той же длины/формы,
-чтобы модель не теряла структуру текста.
+Правила про префиксы и формы известных ключей; в парах присваивания
+(api_key=..., password:...) заменяется только значение. Замена —
+детерминированный мусор той же длины и формы, чтобы модель не теряла
+структуру текста.
 """
 from __future__ import annotations
 
@@ -16,14 +15,13 @@ from compass_llm_filter.core.validators import det_rng
 _ALNUM = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
 PLACEHOLDER = "[SECRET]"
 
-# режимы: "whole" — заменить весь матч; "token" — группу 1 (метку перед ней
-# сохранить, напр. «Bearer »); "kv" — группу 2 между меткой (группа 1) и
-# хвостом (группа 3).
+# режимы: whole — весь матч; token — группу 1 (метку перед ней сохранить);
+# kv — группу 2 между меткой (группа 1) и хвостом (группа 3)
 # (имя, regex, режим)
 RULES: list[tuple[str, re.Pattern, str]] = [
     # приватные ключи: маркер начала блока
     ("private_key", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----"), "whole"),
-    # OpenAI / совместимые
+    # OpenAI и совместимые
     ("openai_key", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}\b"), "whole"),
     # GitHub tokens
     ("github_pat", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{30,}\b"), "whole"),
@@ -48,9 +46,9 @@ RULES: list[tuple[str, re.Pattern, str]] = [
     ("kv_secret", re.compile(
         r"(?i)\b((?:api[-_]?key|apikey|access[-_]?token|secret|password|passwd|pwd|token)"
         r"\s*[:=]\s*[\"']?)([A-Za-z0-9+/_=-]{12,})([\"']?)"), "kv"),
-    # connection string: scheme://user:PASSWORD@HOST — пароль и хост; хост
-    # отдельной группой, т.к. доменная фаза домены после «@» не трогает
-    # (это часть e-mail), а реальный хост БД утечь не должен
+    # connection string: scheme://user:PASSWORD@HOST; хост отдельной группой —
+    # доменная фаза домены после @ не трогает (часть e-mail), а хост БД
+    # утечь не должен
     ("conn_string", re.compile(
         r"\b([a-z][a-z0-9+.-]*://[^/@\s:]+:)([^@\s]+)(@)"
         r"([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,14})"), "conn"),
@@ -66,8 +64,7 @@ _RE_PREFIX_SHORT = re.compile(r"^[A-Za-z0-9]+[-_]")
 
 
 def _fake_for(real: str) -> str:
-    """Фейк той же длины с сохранением распознаваемого префикса (sk-, ghp_,
-    xoxb-...): модель видит, что это по-прежнему упоминание ключа."""
+    """Фейк той же длины с сохранением префикса (sk-, ghp_, xoxb-...)."""
     m = _RE_PREFIX.match(real)
     prefix = m.group(0) if m else ""
     if len(prefix) > 10:
@@ -77,7 +74,7 @@ def _fake_for(real: str) -> str:
 
 
 def _fake_host(host: str) -> str:
-    """Фейк-хост в стиле доменной фазы: <метка>.<hash8>.example.com."""
+    """Фейк-хост в стиле доменной фазы."""
     code = hashlib.sha256(host.lower().encode()).hexdigest()[:8]
     labels = host.split(".")
     if len(labels) >= 3:
@@ -86,11 +83,10 @@ def _fake_host(host: str) -> str:
 
 
 def apply(s: str, anon) -> str:
-    """Маскировка секретов. Вместо фейка в текст ставится маркер \x00sN\x00
-    (раскрывается в конце sanitize_string): иначе email-фаза видит
-    postgres://user:ФЕЙК@host и маскирует «фейк@host» как адрес повторно,
-    а bearer-фаза — фейк от jwt; цепочка подстановок ломала восстановление.
-    В карту попадает ровно заменённый фрагмент (значение без метки)."""
+    """Маскировка секретов. Вместо фейка в текст ставится маркер \x00sN\x00,
+    раскрывается в конце sanitize_string: иначе фейк-пароль в
+    postgres://user:FAKE@host маскировался бы повторно как e-mail. В карту
+    попадает ровно заменённый фрагмент (значение без метки)."""
     for _name, regex, mode in RULES:
         def repl(m: re.Match, _mode=mode) -> str:
             if _mode == "token":

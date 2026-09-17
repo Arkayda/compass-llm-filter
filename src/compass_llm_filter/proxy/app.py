@@ -1,15 +1,12 @@
 """Drop-in reverse-proxy: маскирует запросы к LLM, восстанавливает ответы.
 
-Клиент меняет только base URL. Все строковые значения JSON-тела маскируются
-рекурсивно (без path-based парсинга форматов OpenAI/Anthropic — нечего
-«забыть»); ответ восстанавливается по карте подстановок этого же запроса.
-SSE-стриминг — токен-за-токеном: фейк, разрезанный границей дельт, склеивается
-до замены (SSERestorer). Карта живёт в локальной переменной обработчика:
-оригиналы не покидают процесс и умирают вместе с запросом.
+Клиент меняет только base URL. Все строки JSON-тела маскируются рекурсивно,
+ответ восстанавливается по карте подстановок этого же запроса; SSE —
+токен-за-токеном (SSERestorer). Карта живёт в локальной переменной обработчика,
+оригиналы не покидают процесс.
 
-Заголовок X-Compass-Entities (JSON-массив строк) — контекстная регистрация:
-имена/организации из вашего приложения, которые регулярками не найти.
-Заголовок снимается перед пересылкой наверх.
+Заголовок X-Compass-Entities (JSON-массив строк) — имена/организации из
+приложения, которые регулярками не найти; снимается перед пересылкой наверх.
 """
 from __future__ import annotations
 
@@ -39,7 +36,7 @@ HOP_BY_HOP = {
 
 MASKABLE_METHODS = {"POST", "PUT", "PATCH"}
 
-# каталог встроенных детекторов: (стат-ключ, название, пример, комментарий)
+# каталог встроенных детекторов: (ключ статистики, название, пример, пояснение)
 DETECTORS = [
     ("names", "Имена, фамилии, ники, организации", "Иванов Пётр, @ivanov_petrov, ООО Ромашка",
      "по карте из приложения: X-Compass-Entities / register_entity()"),
@@ -65,18 +62,14 @@ DETECTORS = [
     for key, title, example, note in DETECTORS
 ]
 
-# «словарный» символ — тот же класс, по которому de_anonymize строит границы
-# слов; всё после последнего НЕ-словарного символа считается недописанным
-# токеном и в стриме не обрабатывается до появления границы
+# словарный символ — тот же класс, по которому de_anonymize строит границы слов
 _WORDCH = re.compile(r"[\wА-Яа-яЁё@.\-]")
 
 
 class _StreamSlot:
-    """Накопитель одного строкового поля SSE-потока (ключ — путь в JSON).
-
-    last_obj/path — форма последнего события, в котором поле встречалось:
-    по ней строится синтетическое финальное событие для хвоста, не
-    закрывшегося до [DONE] (фейк в самом конце генерации).
+    """Буфер одного строкового поля SSE-потока (ключ — путь в JSON).
+    last_obj/path — последнее событие поля, по нему строится синтетическое
+    событие для хвоста, не закрывшегося до [DONE].
     """
     __slots__ = ("pending", "last_obj", "path")
 
@@ -100,12 +93,11 @@ def _set_path(obj, path: tuple, value) -> None:
 class SSERestorer:
     """Восстановление оригиналов в SSE-потоке токен-за-токеном.
 
-    Каждое строковое поле (например choices.0.delta.content) копит текст между
-    событиями, поэтому фейк, разрезанный провайдером на несколько дельт,
-    склеивается до замены. Хвост, являющийся строгим префиксом какого-то
-    фейка, придерживается до следующей порции — наружу недопустимые
-    «полуфейки» не уходят. Перед [DONE] придержнутый хвост сбрасывается
-    синтетическим событием той же формы, что последнее событие поля.
+    Каждое строковое поле копит текст между событиями, поэтому фейк,
+    разрезанный провайдером на несколько дельт, склеивается до замены. Хвост —
+    строгий префикс какого-то фейка — придерживается до следующей порции,
+    наружу «полуфейки» не уходят. Перед [DONE] придержнутое сбрасывается
+    синтетическим событием.
     """
 
     def __init__(self, anon: Anonymizer) -> None:
@@ -131,7 +123,7 @@ class SSERestorer:
         return "".join(out).encode("utf-8") if out else b""
 
     def tail(self) -> bytes:
-        """Финальный недообработанный хвост (строка без \\n в конце потока)."""
+        """Хвост потока: последняя строка без \\n + синтетические события."""
         self._buf += self._dec.decode(b"", final=True)
         if not self._buf:
             return b""
@@ -141,10 +133,10 @@ class SSERestorer:
 
     def _feed_line(self, line: str) -> str:
         if not line.startswith("data:") or not line[5:].strip():
-            return line  # комментарии (:...), event:/id:/retry:, пустые data:
+            return line  # комментарии, event:/id:, пустые data:
         payload = line[5:].strip()
         if payload == "[DONE]":
-            # сначала сброс придержнутых хвостов синтетическими событиями
+            # перед DONE — сброс придержнутых хвостов
             return "".join(self._flush_events()) + line
         try:
             obj = json.loads(payload)
@@ -170,9 +162,8 @@ class SSERestorer:
         return obj
 
     def _flush_events(self) -> list[str]:
-        """Синтетические события для хвостов, не закрывшихся до конца потока
-        (фейк в самом конце генерации без границы после него). Форма — клон
-        последнего события поля, прочие строковые поля обнулены."""
+        """Синтетические события для хвостов, не закрывшихся до конца потока:
+        клон последнего события поля, прочие строковые поля обнулены."""
         events = []
         for key, slot in list(self.fields.items()):
             if not slot.pending:
@@ -200,16 +191,15 @@ class SSERestorer:
     def _feed_field(self, key: str, delta: str) -> str:
         slot = self.fields.setdefault(key, _StreamSlot())
         buf = slot.pending + delta
-        # обрабатывать можно только до последнего граничного символа: замена по
-        # границам слов не должна срабатывать на «конце буфера», за которым
-        # может прийти буква (тогда слова нет)
+        # обрабатываем только до последнего граничного символа: за концом
+        # буфера может прийти буква, и слова ещё нет
         cut = 0
         for i in range(len(buf) - 1, -1, -1):
             if not _WORDCH.match(buf[i]):
                 cut = i + 1
                 break
         out = self.anon.de_anonymize(buf[:cut]) if cut else ""
-        # придержать строгий префикс фейка, разрезанный границей дельт
+        # придержать строгий префикс фейка
         hold = ""
         if self.fakes and out:
             for length in range(min(len(out), self.maxfake - 1), 0, -1):
@@ -222,7 +212,7 @@ class SSERestorer:
 
 
 def _mask_strings(obj, anon: Anonymizer):
-    """Заменить PII во всех строках JSON-структуры (в значениях, не в ключах)."""
+    """PII во всех строках JSON (в значениях, не в ключах)."""
     if isinstance(obj, str):
         return anon.sanitize_string(obj)
     if isinstance(obj, list):
@@ -243,7 +233,7 @@ def _restore_strings(obj, anon: Anonymizer):
 
 
 def _apply_custom_rules(obj, anon: Anonymizer, state):
-    """Свои правила поверх встроенных фаз — рекурсивно по тем же строкам."""
+    """Свои правила поверх встроенных фаз, по тем же строкам."""
     if isinstance(obj, str):
         for rule in state.rules.values():
             if rule.enabled:
@@ -267,8 +257,7 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         transport=upstream_transport,
     )
 
-    # ── basic-auth консоли и управляющего API (проксируемый трафик не трогаем:
-    #    приложение ходит в компас без учётки) ────────────────────────────────
+    # basic-auth консоли и управляющего API; проксируемый LLM-трафик не трогаем
     if settings.auth_user and settings.auth_password:
         @app.middleware("http")
         async def _console_auth(request: Request, call_next):
@@ -292,7 +281,7 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
                     )
             return await call_next(request)
 
-    # ── служебные эндпоинты ────────────────────────────────────────────────
+    # --- служебные эндпоинты ---
 
     @app.get("/healthz")
     async def healthz():
@@ -304,7 +293,7 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
 
     @app.get("/console", response_class=HTMLResponse)
     async def console():
-        # консоль без сборки: один файл, едет внутри pip-пакета
+        # один html-файл, едет внутри пакета
         return HTMLResponse(_console_html)
 
     @app.get("/logo.svg")
@@ -369,12 +358,12 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
     async def audit_records():
         return {"records": list(state.audit)}
 
-    # каталог встроенных детекторов (справочно, для консоли; ~16 категорий)
+    # каталог детекторов для консоли
     @app.get("/v1/detectors")
     async def detectors():
         return {"detectors": DETECTORS}
 
-    # песочница консоли: посмотреть, что уйдёт провайдеру и что вернётся
+    # песочница: что уйдёт провайдеру и что вернётся
     @app.post("/v1/sandbox")
     async def sandbox(body: dict):
         anon = Anonymizer(mode=state.anonymization_mode)
@@ -388,7 +377,7 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
             "leaks": anon.leaks_in_text(masked),
         }
 
-    # ── проксирование ──────────────────────────────────────────────────────
+    # --- проксирование ---
 
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
     async def proxy(request: Request, path: str):
@@ -401,17 +390,15 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         headers = {k: v for k, v in request.headers.items()
                    if k.lower() not in HOP_BY_HOP and k.lower() != settings.entities_header}
 
-        # контекстная регистрация сущностей из приложения (fail-closed:
-        # кривой заголовок → 400, недомаскированное наружу не уйдёт).
-        # Заголовки приходят latin-1 (ASGI), клиенты шлют UTF-8: восстанавливаем;
-        # надёжнее всего ASCII-JSON (json.dumps с ensure_ascii по умолчанию).
+        # сущности из приложения; кривой заголовок -> 400 (fail-closed).
+        # ASGI отдаёт заголовки в latin-1, а клиенты шлют UTF-8 — восстанавливаем
         entities = []
         if entities_header_value := request.headers.get(settings.entities_header):
             try:
                 try:
                     entities_header_value = entities_header_value.encode("latin-1").decode("utf-8")
                 except UnicodeDecodeError:
-                    pass  # уже честный latin-1 или ASCII — берём как есть
+                    pass  # latin-1 или ASCII, берём как есть
                 parsed = json.loads(entities_header_value)
                 if not isinstance(parsed, list) or not all(isinstance(e, str) for e in parsed):
                     raise ValueError
@@ -444,7 +431,7 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
                             if state.fail_mode == "closed":
                                 return JSONResponse(status_code=503, content={
                                     "detail": "compass: anonymization failed, request blocked"})
-                            # fail-open: пропускаем оригинал, но честно считаем
+                            # fail-open: пропускаем оригинал
                             metrics.inc("compass_failopen_total")
                             anon = None
                             break
@@ -489,9 +476,7 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         }
         content_type = upstream_response.headers.get("content-type", "")
 
-        # SSE-стриминг: восстановление токен-за-токеном, кадры уходят клиенту
-        # по мере прихода от провайдера (в detect-режим уходил оригинал —
-        # восстанавливать нечего, поток проходит как есть)
+        # SSE: восстановление токен-за-токеном, кадры уходят по мере прихода
         if anon is not None and not detect_only and "event-stream" in content_type:
             restorer = SSERestorer(anon)
 
@@ -514,8 +499,7 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         content = await upstream_response.aread()
         await upstream_response.aclose()
 
-        # восстановление оригиналов в ответе (в detect-режим уходил оригинал —
-        # восстанавливать нечего); SSE обрабатывается стримингом выше
+        # восстановление в обычном (буферизованном) ответе
         if anon is not None and not detect_only and content:
             if "json" in content_type:
                 try:
@@ -544,7 +528,7 @@ def _iter_strings(obj):
 
 
 def main() -> None:
-    """Точка входа `compass-llm-filter`: настройки из COMPASS_* окружения."""
+    """Точка входа `compass-llm-filter`."""
     import uvicorn
 
     settings = Settings.from_env()

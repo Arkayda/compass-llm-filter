@@ -1,12 +1,7 @@
 """Контрольные суммы российских идентификаторов и карт + детерминированный ГПСЧ.
 
-Все проверки — чистые функции над строкой; используются фазами ru_pii,
-чтобы отличать настоящие СНИЛС/ИНН/ОГРН/карты от случайных чисел (номеров
-договоров, unixtime, дат) с тем же количеством цифр. IBAN проверяется по
-ISO 13616 (mod 97).
-
-Формулы: ГОСТ / алгоритм Луна / ISO 13616 — см. тесты на известные валидные
-номера.
+Проверки — чистые функции над строкой: отличают настоящие СНИЛС/ИНН/ОГРН/карты
+от случайных чисел той же длины. IBAN — по ISO 13616 (mod 97).
 """
 from __future__ import annotations
 
@@ -16,16 +11,14 @@ import re
 
 
 def det_rng(*parts) -> random.Random:
-    """Детерминированный ГПСЧ: одинаковым входам всегда одинаковые выходы.
-
-    Seed = SHA256 от склеенных частей — устойчиво к порядку полей, без
-    хранения состояния между вызовами."""
+    """Детерминированный ГПСЧ: seed = SHA256 от склеенных частей, одинаковым
+    входам всегда одинаковые выходы."""
     seed = hashlib.sha256("|".join(str(p) for p in parts).encode("utf-8")).hexdigest()
     return random.Random(seed)
 
 
 def fake_digits(digits: str, extra: int = 0) -> str:
-    """Другие цифры той же длины (первая не 0), детерминированно."""
+    """Другие цифры той же длины, первая не 0."""
     fake = digits
     for attempt in range(extra, extra + 5):
         rng = det_rng("digits", digits, attempt)
@@ -56,7 +49,7 @@ def luhn_check_digit(prefix: str) -> str:
     total = 0
     for i, ch in enumerate(reversed(prefix)):
         d = int(ch)
-        if i % 2 == 0:  # позиция контрольной цифры = чётный индекс с конца
+        if i % 2 == 0:  # позиция контрольной цифры
             d *= 2
             if d > 9:
                 d -= 9
@@ -137,7 +130,7 @@ def ogrnip_check(number14: str) -> str:
     return str(int(number14) % 13 % 10)
 
 
-# --- IBAN (ISO 13616) -----------------------------------------------------------------
+# --- IBAN ---
 
 IBAN_RE = re.compile(r"[A-Z]{2}\d{2}[A-Z0-9]{10,26}")
 
@@ -148,7 +141,7 @@ def _iban_numeric(s: str) -> str:
 
 
 def _mod97(digits: str) -> int:
-    """Остаток по 97 без bigint-конвертации всей строки (потенциально длинной)."""
+    """Остаток по 97 без конвертации всей строки в bigint."""
     rem = 0
     for ch in digits:
         rem = (rem * 10 + int(ch)) % 97
@@ -156,8 +149,7 @@ def _mod97(digits: str) -> int:
 
 
 def iban_ok(value: str) -> bool:
-    """IBAN: страна + 2 контрольные цифры + BBAN. Проверка ISO 13616:
-    переставляем первые 4 знака в конец, mod 97 == 1."""
+    """IBAN по ISO 13616: первые 4 знака в конец, mod 97 == 1."""
     compact = "".join(ch for ch in value if ch.isalnum()).upper()
     if not IBAN_RE.fullmatch(compact) or not 14 <= len(compact) <= 34:
         return False
@@ -165,6 +157,6 @@ def iban_ok(value: str) -> bool:
 
 
 def iban_check_digits(country: str, bban: str) -> str:
-    """Контрольные цифры для страны+BBAN: 98 - mod97(BBAN+страна+00), 2 знака."""
+    """Контрольные цифры: 98 - mod97(BBAN+страна+00)."""
     n = _iban_numeric(bban + country + "00")
     return f"{98 - _mod97(n):02d}"

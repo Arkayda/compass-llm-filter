@@ -1,9 +1,8 @@
-"""Рабочее состояние прокси: настройки, кастомные правила, аудит.
+"""Рабочее состояние прокси: настройки, правила, аудит.
 
-По умолчанию всё в памяти одного процесса — вместе с картой подстановок это
-часть проекта: оригиналы не переживают запрос. COMPASS_STATE_FILE добавляет
-выживание настроек и правил через рестарт (JSON-файл, пишется при каждом
-изменении, читается при старте после env-значений).
+По умолчанию всё в памяти одного процесса. COMPASS_STATE_FILE сохраняет
+настройки и правила через рестарт: пишется при каждом изменении, читается
+при старте поверх env-значений.
 """
 from __future__ import annotations
 
@@ -37,8 +36,7 @@ class CustomRule:
         def repl(m: re.Match) -> str:
             real = m.group(0)
             if self.replacement == "fake":
-                # фейк той же длины с сохранением распознаваемого префикса
-                # (ORD-123456 -> ORD-Q8yVn2)
+                # фейк той же длины, префикс сохраняем (ORD-123456 -> ORD-Q8yVn2)
                 rng = det_rng("custom", self.id, real)
                 pm = _RE_PREFIX.match(real)
                 prefix = pm.group(0) if pm else ""
@@ -88,7 +86,7 @@ class State:
                 self.add_rule(item)
 
     def _load_state_file(self, path: str) -> None:
-        """Настройки+правила из файла состояния (после env-значений)."""
+        """Настройки и правила из файла состояния."""
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)
@@ -105,9 +103,8 @@ class State:
                 continue
 
     def save_state(self) -> None:
-        """Записать настройки+правила в файл состояния. Ошибки IO не роняют
-        запрос (состояние в памяти уже изменено) — рестарт просто вернёт
-        прежние значения."""
+        """Записать состояние в файл. Ошибки IO не роняют запрос: в памяти
+        всё уже изменено, рестарт вернёт прежние значения."""
         if not self.settings.state_file:
             return
         data = {
@@ -121,11 +118,6 @@ class State:
             os.replace(tmp, self.settings.state_file)
         except OSError:
             pass
-
-    def _load_rules_file(self, path: str) -> None:
-        with open(path, encoding="utf-8") as f:
-            for item in json.load(f):
-                self.add_rule(item)
 
     def add_rule(self, data: dict) -> CustomRule:
         pattern = data.get("pattern") or ""
