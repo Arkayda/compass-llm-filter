@@ -39,11 +39,35 @@ def test_kv_secret_label_preserved_value_faked():
     assert "api_key=" in cleaned
     assert "supersecretvalue123" not in cleaned
     assert anon.de_anonymize(cleaned) == "config: api_key=supersecretvalue123"
-    # пароль в connection string: схема/логин/порт остаются, пароль и хост
-    # фейкуются (хост — доменной фазой, это корректно)
-    cleaned2 = anon.sanitize_string("db: postgres://admin:secretpass123@db.local:5432/x")
+    # connection string: схема/логин/порт остаются, пароль и хост фейкуются
+    conn = "db: postgres://admin:secretpass123@db.local:5432/x"
+    cleaned2 = anon.sanitize_string(conn)
     assert "postgres://admin:" in cleaned2 and ":5432/x" in cleaned2
     assert "secretpass123" not in cleaned2 and "db.local" not in cleaned2
+    assert anon.de_anonymize(cleaned2) == conn
+
+
+def test_conn_string_not_double_masked():
+    """Регресс: фейк-пароль в postgres://user:FAKE@host email-фаза считала
+    адресом и маскировала повторно — цепочка подстановок ломала восстановление."""
+    line = "строка: postgres://billing:hunter2pass@db.romashka.ru:5432/prod"
+    anon = Anonymizer()
+    cleaned = anon.sanitize_string(line)
+    assert "hunter2pass" not in cleaned and "db.romashka.ru" not in cleaned
+    assert anon.stats["emails"] == 0  # повторной маскировки не было
+    assert anon.de_anonymize(cleaned) == line
+
+
+def test_bearer_jwt_masked_once():
+    """Регресс: «Bearer <jwt>» раньше маскировали и jwt-, и bearer-правило
+    (подстановка поверх подстановки)."""
+    header = f"Authorization: Bearer {JWT}"
+    anon = Anonymizer()
+    cleaned = anon.sanitize_string(header)
+    assert JWT not in cleaned
+    assert "Authorization: Bearer " in cleaned
+    assert anon.stats["secrets"] == 1
+    assert anon.de_anonymize(cleaned) == header
 
 
 def test_jwt_faked():

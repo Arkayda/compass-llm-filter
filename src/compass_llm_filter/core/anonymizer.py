@@ -173,6 +173,7 @@ class Anonymizer:
         self.name_map: dict[str, str] = {}
         self._used_aliases: set[str] = set()
         self._substitutions: list[tuple[str, str]] = []  # (реальное, фейковое)
+        self._secret_values: list[str] = []  # фейки секретов текущего sanitize_string
         self._phases = None
         self._leak_re = None
         self._leak_lat_re = None
@@ -209,6 +210,15 @@ class Anonymizer:
 
     def _record(self, real: str, fake_value: str) -> None:
         self._substitutions.append((real, fake_value))
+
+    def _secret_mark(self, fake_value: str) -> str:
+        """Секрет -> маркер \x00sN\x00; финальный фейк подставится в конце
+        sanitize_string. Без маркера последующие фазы видят уже вставленный
+        фейк-пароль как e-mail local part (postgres://user:FAKE@host) или как
+        Bearer-токен и маскируют повторно — цепочка подстановок ломает
+        обратное восстановление."""
+        self._secret_values.append(fake_value)
+        return f"\x00s{len(self._secret_values) - 1}\x00"
 
     # --- карты соответствий ------------------------------------------------------------
 
@@ -482,6 +492,7 @@ class Anonymizer:
 
     def sanitize_string(self, s: str) -> str:
         """Замена имён по карте + телефоны/e-mail/ссылки/@упоминания/домены/IP."""
+        self._secret_values = []  # маркеры секретов живут в рамках одного вызова
         if self._phases is None:
             self.prepare()
         if self._phases:
@@ -557,6 +568,11 @@ class Anonymizer:
         # никому не матчятся — двойных подстановок нет
         s = ru_pii.apply(s, self)
         s, n = RE_IP.subn(repl_ip, s); self.stats["ips"] += n
+
+        # раскрытие маркеров секретов (имена раскрываются своим ph_re ниже)
+        if self._secret_values:
+            s = re.sub(r"\x00s(\d+)\x00",
+                       lambda m: self._secret_values[int(m.group(1))], s)
 
         if self._phases:
             s = ph_re.sub(decode, s)

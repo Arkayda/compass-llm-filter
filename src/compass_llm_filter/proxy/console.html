@@ -201,10 +201,33 @@
     <div class="card">
       <h2>Песочница</h2>
       <label>Текст (как в сообщении клиента)</label>
-      <textarea id="sb-text">Клиент ООО Ромашка, тел +7 912 345-67-89, карта 4111 1111 1111 1111,
-напишите на ivan.ivanov@romashka.ru, ключ sk-proj-abcdef1234567890abcdef</textarea>
+      <textarea id="sb-text">Добрый день! Не можем провести оплату — проверьте, пожалуйста, наши реквизиты.
+
+ООО Ромашка, ИНН 7707083893, ОГРН 1027700132195, договор № 8892834271636.
+Контактное лицо: Иванов Пётр Сергеевич (директор).
+Телефон +7 912 345-67-89, почта ivan.ivanov@romashka.ru, телеграм @ivanov_petrov.
+СНИЛС директора: 112-233-445 95, паспорт 4509 123456.
+
+Платим также через ИП Смирнова Анна Игоревна:
+ИНН 500100732259, ОГРНИП 316774600098702, телефон 8-921-111-22-33.
+
+Старая карта 4111 1111 1111 1111 больше не проходит, привязали новую: 4111111111111111.
+
+Офис в домене romashka.ru, портал testrom.sel.apitest.team не открывается.
+Внутренняя сеть 192.168.0.6, внешний IP 135.106.130.166.
+Дамп с роутера: "16:20:01.537215 IP 5.141.102.236.30039 > 10.0.0.1.443: Flags [S]"
+
+Для инженеров: личный кабинет https://cabinet.romashka.ru/login?token=ghp_Ab12Cd34Ef56Gh78Jk90Mn32Pq54Rs76Tu89
+Ключ интеграции: sk-proj-abcdef1234567890abcdef1234
+GLM-ключ: 0123456789abcdef0123456789abcdef.FakePassw0rd17
+AWS из dev-конфига: AKIAIOSFODNN7EXAMPLE
+Google-ключ: AIzaA1b2C3d4E5f6g7H8i9J0k1L2m3N4o5P6q7R8
+Заголовок: Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N95PLFUP0THsR8U
+Строка для БД: postgres://billing:hunter2pass@db.romashka.ru:5432/prod
+
+Внутренний номер заказа: ORD-435921.</textarea>
       <label>Известные сущности (JSON-массив; аналог заголовка X-Compass-Entities)</label>
-      <input type="text" id="sb-entities" value='["ООО Ромашка"]'>
+      <input type="text" id="sb-entities" value='["ООО Ромашка", "Иванов Пётр Сергеевич", "Смирнова Анна Игоревна"]'>
       <button class="btn" onclick="runSandbox()">Проверить</button>
       <label>Что увидит провайдер</label>
       <div class="out" id="sb-masked">—</div>

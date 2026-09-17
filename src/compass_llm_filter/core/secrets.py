@@ -8,6 +8,7 @@ LLM-провайдер недопустима. Правила — про пре�
 """
 from __future__ import annotations
 
+import hashlib
 import re
 
 from compass_llm_filter.core.validators import det_rng
@@ -47,8 +48,12 @@ RULES: list[tuple[str, re.Pattern, str]] = [
     ("kv_secret", re.compile(
         r"(?i)\b((?:api[-_]?key|apikey|access[-_]?token|secret|password|passwd|pwd|token)"
         r"\s*[:=]\s*[\"']?)([A-Za-z0-9+/_=-]{12,})([\"']?)"), "kv"),
-    # пароль в connection string: scheme://user:PASSWORD@host
-    ("conn_string", re.compile(r"\b([a-z][a-z0-9+.-]*://[^/@\s:]+:)([^@\s]+)(@)"), "kv"),
+    # connection string: scheme://user:PASSWORD@HOST — пароль и хост; хост
+    # отдельной группой, т.к. доменная фаза домены после «@» не трогает
+    # (это часть e-mail), а реальный хост БД утечь не должен
+    ("conn_string", re.compile(
+        r"\b([a-z][a-z0-9+.-]*://[^/@\s:]+:)([^@\s]+)(@)"
+        r"([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,14})"), "conn"),
 ]
 
 
@@ -71,22 +76,46 @@ def _fake_for(real: str) -> str:
     return prefix + _junk(det_rng("secret", real), len(real) - len(prefix))
 
 
+def _fake_host(host: str) -> str:
+    """Фейк-хост в стиле доменной фазы: <метка>.<hash8>.example.com."""
+    code = hashlib.sha256(host.lower().encode()).hexdigest()[:8]
+    labels = host.split(".")
+    if len(labels) >= 3:
+        return f"{labels[0]}.{code}.example.com"
+    return f"{code}.example.com"
+
+
 def apply(s: str, anon) -> str:
+    """Маскировка секретов. Вместо фейка в текст ставится маркер \x00sN\x00
+    (раскрывается в конце sanitize_string): иначе email-фаза видит
+    postgres://user:ФЕЙК@host и маскирует «фейк@host» как адрес повторно,
+    а bearer-фаза — фейк от jwt; цепочка подстановок ломала восстановление.
+    В карту попадает ровно заменённый фрагмент (значение без метки)."""
     for _name, regex, mode in RULES:
         def repl(m: re.Match, _mode=mode) -> str:
-            whole = m.group(0)
             if _mode == "token":
-                kept, value = whole[:whole.index(m.group(1))], m.group(1)
-                fake_value = _fake_for(value) if anon.fake else PLACEHOLDER
-                result = kept + fake_value
+                whole = m.group(0)
+                value = m.group(1)
+                kept = whole[:whole.index(value)]
+            elif _mode == "conn":
+                value = m.group(2)
             elif _mode == "kv":
-                label, value, tail = m.group(1), m.group(2), m.group(3) or ""
-                fake_value = _fake_for(value) if anon.fake else PLACEHOLDER
-                result = label + fake_value + tail
+                value = m.group(2)
             else:
-                result = _fake_for(whole) if anon.fake else PLACEHOLDER
-            anon._record(whole, result)
+                value = m.group(0)
+            fake_value = _fake_for(value) if anon.fake else PLACEHOLDER
+            anon._record(value, fake_value)
             anon.stats["secrets"] = anon.stats.get("secrets", 0) + 1
-            return result
+            mark = anon._secret_mark(fake_value)
+            if _mode == "token":
+                return kept + mark
+            if _mode == "kv":
+                return m.group(1) + mark + (m.group(3) or "")
+            if _mode == "conn":
+                host = m.group(4)
+                fake_host = _fake_host(host) if anon.fake else "[DOMAIN]"
+                anon._record(host, fake_host)
+                return m.group(1) + mark + m.group(3) + anon._secret_mark(fake_host)
+            return mark
         s = regex.sub(repl, s)
     return s
