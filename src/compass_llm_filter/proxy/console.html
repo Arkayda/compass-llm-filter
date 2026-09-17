@@ -85,6 +85,8 @@
   .pill.ok { background: var(--ok-bg); color: var(--ok-tx); }
   .pill.bad { background: var(--bad-bg); color: var(--bad-tx); }
   .pill.warn { background: var(--warn-bg); color: var(--warn-tx); }
+  .pill.muted { background: var(--gray100); color: var(--gray600); }
+  .badges { display: flex; flex-wrap: wrap; gap: 8px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th { text-align: left; background: var(--gray50); color: var(--muted); font-weight: 500;
        font-size: 11px; text-transform: uppercase; letter-spacing: .03em;
@@ -116,6 +118,10 @@
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
         Обзор
       </button>
+      <button data-tab="settings">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        Настройки
+      </button>
       <button data-tab="rules">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 3v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5z"/></svg>
         Правила
@@ -135,6 +141,26 @@
 
   <!-- ОБЗОР -->
   <section id="tab-overview">
+    <div class="card">
+      <div class="card-h">
+        <h2>Статус</h2>
+        <button class="btn ghost small" onclick="showTab('settings')">Настройки</button>
+      </div>
+      <div id="ov-badges" class="badges"><span class="pill">…</span></div>
+      <div class="hint" id="ov-upstream"></div>
+    </div>
+    <div class="card">
+      <h2>Срабатывания по типам</h2>
+      <div class="grid" id="overview-stats"><div class="empty">нет данных — прогоните трафик</div></div>
+    </div>
+    <div class="card">
+      <h2>Блокировки и ошибки</h2>
+      <div class="grid" id="ov-errors"><div class="empty">нет данных — прогоните трафик</div></div>
+    </div>
+  </section>
+
+  <!-- НАСТРОЙКИ -->
+  <section id="tab-settings" hidden>
     <div class="card">
       <h2>Режим работы</h2>
       <div class="row">
@@ -163,10 +189,6 @@
       <button class="btn" onclick="saveSettings()">Применить</button>
       <span class="hint">Применяется без перезапуска сервиса</span>
     </div>
-    <div class="card">
-      <h2>Срабатывания по типам</h2>
-      <div class="grid" id="overview-stats"><div class="empty">нет данных — прогоните трафик</div></div>
-    </div>
   </section>
 
   <!-- ПРАВИЛА -->
@@ -193,6 +215,14 @@
       <h2>Свои правила</h2>
       <table><thead><tr><th>Название</th><th>Regex</th><th>Замена</th><th>Вкл</th><th></th></tr></thead>
       <tbody id="rules-body"><tr><td colspan="5" class="empty">правил пока нет</td></tr></tbody></table>
+    </div>
+    <div class="card">
+      <div class="card-h">
+        <h2>Встроенные детекторы</h2>
+        <span class="hint" style="margin:0">зашиты в ядро, включены всегда</span>
+      </div>
+      <table><thead><tr><th>Тип</th><th>Пример</th><th>Как работает</th></tr></thead>
+      <tbody id="detectors-body"><tr><td colspan="3" class="empty">загрузка…</td></tr></tbody></table>
     </div>
   </section>
 
@@ -256,37 +286,69 @@ Google-ключ: AIzaA1b2C3d4E5f6g7H8i9J0k1L2m3N4o5P6q7R8
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
-document.querySelectorAll('nav button').forEach(btn => btn.onclick = () => {
-  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  ['overview','rules','sandbox','audit'].forEach(t => $('tab-' + t).hidden = t !== btn.dataset.tab);
-  if (btn.dataset.tab === 'audit') loadAudit();
-});
+const TABS = ['overview', 'settings', 'rules', 'sandbox', 'audit'];
+
+function showTab(name) {
+  document.querySelectorAll('nav button').forEach(b =>
+    b.classList.toggle('active', b.dataset.tab === name));
+  TABS.forEach(t => $('tab-' + t).hidden = t !== name);
+  if (name === 'audit') loadAudit();
+}
+
+document.querySelectorAll('nav button').forEach(btn => btn.onclick = () => showTab(btn.dataset.tab));
 
 async function api(path, opts) {
   const resp = await fetch(path, opts && {headers: {'Content-Type': 'application/json'}, ...opts});
   return resp.json();
 }
 
+const MODE_TITLES = {
+  enforce: ['enforce — маскирование', 'ok'],
+  detect: ['detect — shadow', 'warn'],
+};
+const FAIL_TITLES = {
+  closed: ['fail-closed — блокировать при сбое', 'ok'],
+  open: ['fail-open — пропускать при сбое', 'warn'],
+};
+const ANON_TITLES = {
+  fake: 'подстановки: реалистичные',
+  placeholders: 'подстановки: плейсхолдеры',
+};
+
 async function loadOverview() {
   try {
     const health = await api('/healthz');
-    $('upstream-info').textContent = health.upstream + ' · режим: ' + health.mode;
+    $('upstream-info').textContent = health.upstream;
     $('set-mode').value = health.mode; $('set-fail').value = health.fail_mode;
     $('set-anon').value = health.anonymization_mode;
+    const [mode, modeCls] = MODE_TITLES[health.mode] || [health.mode, 'muted'];
+    const [fail, failCls] = FAIL_TITLES[health.fail_mode] || [health.fail_mode, 'muted'];
+    $('ov-badges').innerHTML =
+      `<span class="pill ${modeCls}">${mode}</span>` +
+      `<span class="pill ${failCls}">${fail}</span>` +
+      `<span class="pill muted">${ANON_TITLES[health.anonymization_mode] || health.anonymization_mode}</span>`;
+    $('ov-upstream').textContent = 'апстрим: ' + health.upstream;
+
     const metrics = await (await fetch('/metrics')).text();
-    const stats = {};
+    const stats = {}, errors = {};
     metrics.split('\n').forEach(line => {
-      const m = line.match(/^compass_masked_total\{type="(\w+)"\} (\d+)$/);
+      let m = line.match(/^compass_masked_total\{type="(\w+)"\} (\d+)$/);
       if (m && +m[2] > 0) stats[m[1]] = +m[2];
+      m = line.match(/^(compass_blocked_total|compass_failopen_total|compass_mask_errors_total|compass_upstream_errors_total) (\d+)$/);
+      if (m && +m[2] > 0) errors[m[1].replace(/^compass_|_total$/g, '')] = +m[2];
     });
     const titles = {phones:'Телефоны', cards:'Карты', emails:'E-mail', links:'Ссылки',
       domains:'Домены', ips:'IP-адреса', names:'Имена', mentions:'@упоминания',
       snils:'СНИЛС', inns:'ИНН', inns12:'ИНН-12', ogrns:'ОГРН', ogrnips:'ОГРНИП',
-      passports:'Паспорта', secrets:'Секреты', custom:'Свои правила'};
+      passports:'Паспорта', ibans:'IBAN', secrets:'Секреты', custom:'Свои правила'};
     const grid = Object.entries(stats).map(([k, v]) =>
       `<div class="stat"><div class="v">${v}</div><div class="k">${titles[k] || k}</div></div>`).join('');
     $('overview-stats').innerHTML = grid || '<div class="empty">нет данных — прогоните трафик</div>';
+    const errTitles = {blocked:'Заблокировано', failopen:'Пропущено (fail-open)',
+      'mask_errors':'Ошибки маскирования', 'upstream_errors':'Ошибки апстрима'};
+    const errGrid = Object.entries(errors).map(([k, v]) =>
+      `<div class="stat"><div class="v">${v}</div><div class="k">${errTitles[k] || k}</div></div>`).join('');
+    $('ov-errors').innerHTML = errGrid || '<div class="empty">всё чисто</div>';
   } catch (e) { console.error(e); }
 }
 
@@ -295,6 +357,18 @@ async function saveSettings() {
     mode: $('set-mode').value, fail_mode: $('set-fail').value,
     anonymization_mode: $('set-anon').value})});
   loadOverview();
+}
+
+async function loadDetectors() {
+  try {
+    const data = await api('/v1/detectors');
+    const body = $('detectors-body');
+    body.innerHTML = data.detectors.map(d => `<tr>
+      <td>${esc(d.title)}</td>
+      <td class="mono">${esc(d.example)}</td>
+      <td>${esc(d.note)}</td>
+    </tr>`).join('');
+  } catch (e) { console.error(e); }
 }
 
 async function loadRules() {
@@ -348,11 +422,13 @@ async function loadAudit() {
     <td>${esc(r.mode || '—')}</td>
     <td class="mono">${r.detected ? Object.entries(r.detected).map(([k, v]) => k + ':' + v).join(' ') : '—'}</td>
     <td class="mono">${r.entities ?? '—'}</td>
-    <td>${r.blocked ? '<span class="pill bad">заблокирован</span>' : '<span class="pill ok">ок</span>'}</td>
+    <td>${r.blocked
+      ? `<span class="pill bad">заблокирован</span>${r.reason ? '<div class="hint" style="margin:4px 0 0">' + esc(r.reason) + '</div>' : ''}`
+      : '<span class="pill ok">ок</span>'}</td>
   </tr>`).join('');
 }
 
-loadOverview(); loadRules();
+loadOverview(); loadRules(); loadDetectors();
 setInterval(loadOverview, 5000);
 </script>
 </body>
