@@ -74,3 +74,17 @@ def test_det_rng_deterministic():
     assert v.det_rng("a", 1).random() != v.det_rng("a", 2).random()
     assert v.fake_digits("1234567890") != "1234567890"
     assert len(v.fake_digits("1234567890")) == 10
+
+
+def test_iban_known_valid():
+    assert v.iban_ok("GB82 WEST 1234 5698 7654 32")   # классический пример ISO
+    assert v.iban_ok("DE89 3704 0044 0532 0130 00")
+    assert v.iban_ok("FR1420041010050500013M02606")   # BBAN с буквой, без пробелов
+    assert not v.iban_ok("GB82 WEST 1234 5698 7654 31")  # чек-цифра сбита
+    assert not v.iban_ok("toolongvalue123")            # не формат
+
+
+def test_iban_check_digits_generate_valid():
+    country, bban = "DE", "370400440532013000"
+    full = country + v.iban_check_digits(country, bban) + bban
+    assert v.iban_ok(full)

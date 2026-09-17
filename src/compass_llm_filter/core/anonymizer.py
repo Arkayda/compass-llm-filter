@@ -181,7 +181,7 @@ class Anonymizer:
             "names": 0, "links": 0, "emails": 0, "phones": 0,
             "mentions": 0, "ips": 0, "domains": 0,
             "cards": 0, "snils": 0, "inns": 0, "inns12": 0,
-            "ogrns": 0, "ogrnips": 0, "passports": 0, "secrets": 0,
+            "ogrns": 0, "ogrnips": 0, "passports": 0, "ibans": 0, "secrets": 0,
         }
 
     # --- регистрация известных сущностей (имена/компании) ---------------------------
@@ -562,11 +562,15 @@ class Anonymizer:
         s, n = RE_MENTION.subn(repl_mention, s); self.stats["mentions"] += n
         s = RE_WILDCARD_DOMAIN.sub(repl_wildcard, s)  # счётчик ведёт repl
         s = RE_DOMAIN.sub(repl_domain, s)  # счётчик ведёт repl
+        # IBAN — ДО телефона, поздним маркером: его цифровой хвост телефонная
+        # фаза считает телефоном, а фейк-IBAN (валидный!) замаскировался бы
+        # повторно; маркер раскрывается в конце, как у секретов
+        s = ru_pii.apply(s, self, only=("ibans",), mark_late=True)
         s = RE_PHONE_CANDIDATE.sub(repl_phone, s)  # счётчик ведёт repl (пропуски не считаются)
         # RU-идентификаторы — ПОСЛЕ телефона: валидные СНИЛС/ИНН/ОГРН телефонная
         # фаза пропустила (см. _ru_identifier), а фейки ru_pii (11–16 цифр) уже
         # никому не матчятся — двойных подстановок нет
-        s = ru_pii.apply(s, self)
+        s = ru_pii.apply(s, self, skip=("ibans",))
         s, n = RE_IP.subn(repl_ip, s); self.stats["ips"] += n
 
         # раскрытие маркеров секретов (имена раскрываются своим ph_re ниже)

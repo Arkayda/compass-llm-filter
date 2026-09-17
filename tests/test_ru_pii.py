@@ -2,7 +2,7 @@
 import re
 
 from compass_llm_filter import Anonymizer
-from compass_llm_filter.core.validators import luhn_ok, inn_ok, ogrn_ok, snils_ok
+from compass_llm_filter.core.validators import iban_ok, inn_ok, luhn_ok, ogrn_ok, snils_ok
 
 
 def _digits(s: str) -> str:
@@ -131,3 +131,26 @@ def test_combined_text_no_leaks_and_full_roundtrip():
     restored = anon.de_anonymize(cleaned)
     assert "ООО Ромашка" in restored and "4111 1111 1111 1111" in restored
     assert "+7 912 345-67-89" in restored and "7707083893" in restored
+
+
+def test_iban_masked_with_valid_fake_and_roundtrip():
+    anon = Anonymizer()
+    original = "GB82 WEST 1234 5698 7654 32"
+    cleaned = anon.sanitize_string(f"реквизиты для оплаты: {original}")
+    assert original not in cleaned
+    assert anon.stats["ibans"] == 1
+    fake = cleaned.split(":")[1].strip()
+    assert iban_ok(fake.replace(" ", ""))          # фейк — валидный IBAN
+    assert fake[:2] == "GB82"[:2]                  # страна сохранена
+    assert len(fake.replace(" ", "")) == len(original.replace(" ", ""))
+    assert anon.de_anonymize(cleaned) == f"реквизиты для оплаты: {original}"
+
+
+def test_iban_invalid_checksum_not_iban():
+    # чек не прошёл — IBAN не опознан; цифровой хвост телефонная фаза маскирует
+    # как обычный цифровой блок (консервативно), префикс остаётся как есть
+    anon = Anonymizer()
+    cleaned = anon.sanitize_string("счёт GB82 WEST 1234 5698 7654 31 неверный")
+    assert "GB82 WEST" in cleaned
+    assert "1234 5698 7654 31" not in cleaned
+    assert anon.stats["ibans"] == 0
