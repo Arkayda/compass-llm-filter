@@ -22,6 +22,8 @@ class Settings:
     max_body_bytes: int = 10 * 1024 * 1024
     entities_header: str = "x-compass-entities"
     custom_rules_file: str = ""      # опционально: файл со своими правилами при старте
+    auth_user: str = ""              # basic-auth консоли/управляющего API (оба или ничего)
+    auth_password: str = ""
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -38,6 +40,8 @@ class Settings:
             max_body_bytes=int(env.get("COMPASS_MAX_BODY_BYTES", str(10 * 1024 * 1024))),
             entities_header=env.get("COMPASS_ENTITIES_HEADER", "x-compass-entities").lower(),
             custom_rules_file=env.get("COMPASS_CUSTOM_RULES_FILE", ""),
+            auth_user=env.get("COMPASS_AUTH_USER", ""),
+            auth_password=env.get("COMPASS_AUTH_PASSWORD", ""),
         )
         if s.mode not in ("enforce", "detect"):
             raise ValueError(f"COMPASS_MODE must be enforce|detect, got {s.mode!r}")

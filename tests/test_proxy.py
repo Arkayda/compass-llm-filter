@@ -1,5 +1,6 @@
 """Интеграция прокси: маскирование запроса, восстановление ответа, detect,
 fail-closed, entities-заголовок, правила, аудит, метрики. Апстрим — мок."""
+import base64
 import json
 
 import httpx
@@ -255,3 +256,26 @@ async def test_entities_header_raw_utf8_bytes_recovered():
     sent = seen[0]["body"]["messages"][0]["content"]
     assert "Ромашка" not in sent
     assert "Ромашка" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_console_basic_auth():
+    settings = make_settings(auth_user="compass", auth_password="s3cret")
+    seen = []
+    async with make_client(settings, seen) as client:
+        # консоль и управляющий API закрыты
+        assert (await client.get("/console")).status_code == 401
+        assert (await client.get("/metrics")).status_code == 401
+        assert (await client.get("/v1/rules")).status_code == 401
+        # неверный пароль не пускает
+        bad = (base64.b64encode(b"compass:wrong").decode())
+        assert (await client.get("/console",
+                headers={"Authorization": f"Basic {bad}"})).status_code == 401
+        # верный — пускает
+        good = base64.b64encode(b"compass:s3cret").decode()
+        assert (await client.get("/console",
+                headers={"Authorization": f"Basic {good}"})).status_code == 200
+        # проксируемый трафик работает без учётки (приложение ходит напрямую)
+        resp = await client.post("/chat/completions", json=chat_payload(f"тел {PHONE}"))
+    assert resp.status_code == 200
+    assert PHONE not in seen[0]["body"]["messages"][0]["content"]

@@ -12,6 +12,8 @@
 """
 from __future__ import annotations
 
+import base64
+import hmac
 import json
 import pathlib
 import uuid
@@ -79,6 +81,31 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         timeout=httpx.Timeout(120.0, connect=10.0),
         transport=upstream_transport,
     )
+
+    # ── basic-auth консоли и управляющего API (проксируемый трафик не трогаем:
+    #    приложение ходит в компас без учётки) ────────────────────────────────
+    if settings.auth_user and settings.auth_password:
+        @app.middleware("http")
+        async def _console_auth(request: Request, call_next):
+            path = request.url.path
+            if (path in ("/console", "/logo.svg", "/metrics", "/healthz")
+                    or path.startswith("/v1/")):
+                header = request.headers.get("authorization", "")
+                ok = False
+                if header.startswith("Basic "):
+                    try:
+                        creds = base64.b64decode(header[6:]).decode("utf-8")
+                        user, _, password = creds.partition(":")
+                        ok = (hmac.compare_digest(user.encode(), settings.auth_user.encode())
+                              and hmac.compare_digest(password.encode(), settings.auth_password.encode()))
+                    except (ValueError, UnicodeDecodeError):
+                        ok = False
+                if not ok:
+                    return Response(
+                        status_code=401,
+                        headers={"WWW-Authenticate": 'Basic realm="compass"'},
+                    )
+            return await call_next(request)
 
     # ── служебные эндпоинты ────────────────────────────────────────────────
 
