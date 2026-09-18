@@ -298,6 +298,23 @@ async def test_console_basic_auth():
 
 
 @pytest.mark.asyncio
+async def test_healthz_loopback_bypasses_auth():
+    # Docker healthcheck ходит с 127.0.0.1 и не знает пароля
+    settings = make_settings(auth_user="compass", auth_password="s3cret")
+    app = create_app(settings, upstream_transport=echo_upstream([]))
+
+    async with AsyncClient(transport=ASGITransport(app=app, client=("127.0.0.1", 51234)),
+                           base_url="http://127.0.0.1") as local:
+        assert (await local.get("/healthz")).status_code == 200
+        # остальное с loopback по-прежнему под паролем
+        assert (await local.get("/metrics")).status_code == 401
+
+    async with AsyncClient(transport=ASGITransport(app=app, client=("10.0.0.9", 51234)),
+                           base_url="http://10.0.0.9") as remote:
+        assert (await remote.get("/healthz")).status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_healthz_auth_warning_and_strict_auth():
     # Без auth_user/password healthz сообщает, что auth_configured=False и выдаёт warning
     async with make_client(make_settings(), []) as client:

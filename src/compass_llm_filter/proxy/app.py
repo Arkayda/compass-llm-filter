@@ -378,13 +378,16 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
                     return JSONResponse(status_code=403, content={"detail": "CSRF: Referer mismatch rejected"})
         return await call_next(request)
 
-    # basic-auth консоли и управляющего API; проксируемый LLM-трафик не трогаем
+    # basic-auth консоли и управляющего API; проксируемый LLM-трафик не трогаем.
+    # /healthz с loopback открыт без пароля — по нему ходит Docker healthcheck
     if settings.auth_user and settings.auth_password:
         @app.middleware("http")
         async def _console_auth(request: Request, call_next):
             path = request.url.path
             if (path in ("/console", "/logo.svg", "/metrics", "/healthz")
                     or path.startswith("/v1/")):
+                if path == "/healthz" and request.client and request.client.host in ("127.0.0.1", "::1"):
+                    return await call_next(request)
                 header = request.headers.get("authorization", "")
                 ok = False
                 if header.startswith("Basic "):
