@@ -98,6 +98,31 @@ def test_passport_faked():
     assert anon.de_anonymize(cleaned) == text
 
 
+def test_passport_variations_faked_and_restored():
+    anon = Anonymizer()
+    text1 = "паспорт 4509-123456"
+    cleaned1 = anon.sanitize_string(text1)
+    assert "4509-123456" not in cleaned1
+    assert re.search(r"\d{4}-\d{6}", cleaned1)
+    assert anon.de_anonymize(cleaned1) == text1
+
+    text2 = "серия 4509 № 123456"
+    cleaned2 = anon.sanitize_string(text2)
+    assert "4509 № 123456" not in cleaned2
+    assert re.search(r"\d{4} № \d{6}", cleaned2)
+    assert anon.de_anonymize(cleaned2) == text2
+
+    # слитный номер с контекстом слова «паспорт»
+    text3 = "мой паспорт 4509123456 выдан кем-то"
+    cleaned3 = anon.sanitize_string(text3)
+    assert "4509123456" not in cleaned3
+    assert anon.de_anonymize(cleaned3) == text3
+
+    # без контекста таймстемп не считается паспортом
+    text4 = "unixtime 1758000000"
+    assert anon.sanitize_string(text4) == text4
+
+
 def test_tcpdump_regress_still_clean():
     # старый регресс не должен сломаться новыми фазами (длинные цифровые цепочки)
     anon = Anonymizer()

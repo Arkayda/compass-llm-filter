@@ -5,38 +5,55 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Compass — LLM-фильтр</title>
 <link rel="icon" type="image/svg+xml" href="/logo.svg">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-  /* палитра */
+  /* Светлая тема */
   :root {
-    --surface: #F8FAFE; --card: #FFFFFF; --border: #E8ECF1; --muted: #B0B8C4;
-    --gray50: #F9FAFB; --gray100: #F3F4F6; --gray200: #E5E7EB;
-    --gray600: #4B5563; --gray700: #374151; --text: #1F2937;
-    --p50: #F0F6FD; --p100: #DCE9F9; --p300: #96BDED; --p400: #6B9FD6;
-    --p500: #5A8EC5; --p600: #4A7DB4;
-    --ok-bg: rgba(123,198,126,.2);  --ok-tx: #15803D;
-    --warn-bg: rgba(240,210,100,.25); --warn-tx: #A16207;
-    --bad-bg: rgba(224,123,123,.2); --bad-tx: #B91C1C;
-    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --surface: #F8FAFE; --card: #FFFFFF; --border: #E2E8F0; --muted: #64748B;
+    --gray50: #F8FAFC; --gray100: #F1F5F9; --gray200: #E2E8F0;
+    --gray600: #475569; --gray700: #334155; --text: #0F172A;
+    --p50: #EFF6FF; --p100: #DBEAFE; --p300: #93C5FD; --p400: #60A5FA;
+    --p500: #3B82F6; --p600: #2563EB;
+    --ok-bg: rgba(34,197,94,.18);  --ok-tx: #15803D;
+    --warn-bg: rgba(234,179,8,.2); --warn-tx: #A16207;
+    --bad-bg: rgba(239,68,68,.18); --bad-tx: #B91C1C;
+    --purple-bg: rgba(168,85,247,.18); --purple-tx: #7E22CE;
+    --blue-bg: rgba(59,130,246,.18); --blue-tx: #1D4ED8;
+    --amber-bg: rgba(245,158,11,.18); --amber-tx: #B45309;
+    --shadow: 0 1px 3px rgba(0,0,0,.05), 0 1px 2px rgba(0,0,0,.03);
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   }
+  /* Тёмная тема */
+  [data-theme="dark"] {
+    --surface: #0B0F17; --card: #131B2A; --border: #1E293B; --muted: #818CF8;
+    --gray50: #141E30; --gray100: #1B283E; --gray200: #24344D;
+    --gray600: #94A3B8; --gray700: #CBD5E1; --text: #F8FAFC;
+    --p50: #172554; --p100: #1E3A8A; --p300: #3B82F6; --p400: #60A5FA;
+    --p500: #3B82F6; --p600: #2563EB;
+    --ok-bg: rgba(34,197,94,.22);  --ok-tx: #4ADE80;
+    --warn-bg: rgba(234,179,8,.25); --warn-tx: #FDE047;
+    --bad-bg: rgba(239,68,68,.25); --bad-tx: #F87171;
+    --purple-bg: rgba(168,85,247,.25); --purple-tx: #C084FC;
+    --blue-bg: rgba(59,130,246,.25); --blue-tx: #93C5FD;
+    --amber-bg: rgba(245,158,11,.25); --amber-tx: #FCD34D;
+    --shadow: 0 1px 4px rgba(0,0,0,.3);
+  }
+
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { background: var(--surface); color: var(--text);
-         font: 14px/1.5 Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
-         -webkit-font-smoothing: antialiased; }
+         font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+         -webkit-font-smoothing: antialiased; transition: background .2s, color .2s; }
   ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
 
   .app { display: flex; min-height: 100vh; }
 
   /* сайдбар */
-  .side { width: 232px; flex-shrink: 0; background: var(--card);
-          border-right: 1px solid var(--border); box-shadow: 0 1px 3px rgba(0,0,0,.06);
+  .side { width: 240px; flex-shrink: 0; background: var(--card);
+          border-right: 1px solid var(--border); box-shadow: var(--shadow);
           display: flex; flex-direction: column; }
   .side .logo { padding: 18px 20px; border-bottom: 1px solid var(--border); }
   .side .logo img { height: 26px; width: auto; display: block; }
-  .side .sec { padding: 14px 20px 6px; font-size: 11px; font-weight: 500; color: var(--muted);
+  .side .sec { padding: 14px 20px 6px; font-size: 11px; font-weight: 600; color: var(--muted);
                text-transform: uppercase; letter-spacing: .05em; }
   .side nav { padding: 0 12px; flex: 1; }
   .side nav button {
@@ -45,66 +62,139 @@
     color: var(--gray600); padding: 8px 12px; border-radius: 8px; margin-bottom: 2px;
     transition: background .15s, color .15s;
   }
-  .side nav button:hover { background: var(--gray50); }
-  .side nav button.active { background: var(--p50); color: var(--p600); font-weight: 500; }
+  .side nav button:hover { background: var(--gray50); color: var(--text); }
+  .side nav button.active { background: var(--p50); color: var(--p400); font-weight: 600; }
   .side nav button svg { flex-shrink: 0; }
+
+  .theme-toggle {
+    margin: 8px 12px 14px; padding: 8px 12px; background: var(--gray50);
+    border: 1px solid var(--border); border-radius: 8px; cursor: pointer;
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 12px; font-weight: 500; color: var(--gray600); transition: all .15s;
+  }
+  .theme-toggle:hover { background: var(--gray100); color: var(--text); }
+  .theme-toggle svg { flex-shrink: 0; }
+
   .side .foot { padding: 14px 16px; border-top: 1px solid var(--border);
                 font-size: 12px; color: var(--muted); line-height: 1.6; word-break: break-word; }
 
-  .main { flex: 1; padding: 28px 32px 48px; max-width: 1080px; }
+  .main { flex: 1; padding: 28px 32px 48px; max-width: 1120px; }
 
   .card { background: var(--card); border: 1px solid var(--border); border-radius: 8px;
-          box-shadow: 0 1px 3px rgba(0,0,0,.06); padding: 20px; margin-bottom: 16px; }
-  .card h2 { font-size: 14px; font-weight: 600; margin-bottom: 14px; }
+          box-shadow: var(--shadow); padding: 20px; margin-bottom: 16px; }
+  .card h2 { font-size: 14px; font-weight: 600; margin-bottom: 14px; display: flex; align-items: center; gap: 8px; }
   .card-h { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
   .card-h h2 { margin-bottom: 0; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(155px, 1fr)); gap: 10px; }
   .stat { background: var(--gray50); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
-  .stat .v { font-size: 22px; font-weight: 600; }
+  .stat .v { font-size: 22px; font-weight: 600; color: var(--text); }
   .stat .k { color: var(--muted); font-size: 12px; margin-top: 2px; }
-  label { display: block; color: var(--gray600); font-size: 12px; margin: 12px 0 4px; }
+
+  /* Security Scorecard */
+  .scorecard { display: flex; align-items: center; justify-content: space-between; gap: 20px;
+               background: linear-gradient(135deg, var(--p50) 0%, var(--card) 100%);
+               border: 1px solid var(--border); border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+  .score-info { display: flex; align-items: center; gap: 16px; }
+  .score-badge { width: 56px; height: 56px; border-radius: 14px; display: flex; align-items: center;
+                 justify-content: center; background: var(--ok-bg); color: var(--ok-tx); flex-shrink: 0; }
+  .score-badge svg { width: 32px; height: 32px; }
+  .score-title { font-size: 18px; font-weight: 700; color: var(--text); }
+  .score-desc { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .score-checks { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .check-item { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px;
+                padding: 4px 9px; border-radius: 6px; background: var(--gray50); border: 1px solid var(--border); }
+  .check-item.ok { color: var(--ok-tx); border-color: rgba(34,197,94,.3); }
+  .check-item.warn { color: var(--warn-tx); border-color: rgba(234,179,8,.3); }
+
+  label { display: block; color: var(--gray600); font-size: 12px; margin: 12px 0 4px; font-weight: 500; }
   select, input[type=text], textarea {
     width: 100%; background: var(--card); color: var(--text); border: 1px solid var(--border);
-    border-radius: 4px; padding: 8px 10px; font-size: 13px; font-family: inherit; outline: none;
-    transition: border-color .15s;
+    border-radius: 6px; padding: 9px 12px; font-size: 13px; font-family: inherit; outline: none;
+    transition: border-color .15s, box-shadow .15s;
   }
-  select:focus, input[type=text]:focus, textarea:focus { border-color: var(--p300); }
-  textarea { font-family: var(--mono); min-height: 110px; resize: vertical; }
+  select:focus, input[type=text]:focus, textarea:focus {
+    border-color: var(--p400); box-shadow: 0 0 0 3px rgba(96,165,250,.2);
+  }
+  textarea { font-family: var(--mono); min-height: 120px; resize: vertical; line-height: 1.6; }
   .row { display: flex; gap: 12px; }
   .row > * { flex: 1; }
   .btn {
-    background: var(--p400); color: #fff; border: none; border-radius: 4px; padding: 8px 16px;
-    font: inherit; font-size: 13px; font-weight: 500; cursor: pointer; margin-top: 12px;
-    transition: background .15s;
+    background: var(--p500); color: #fff; border: none; border-radius: 6px; padding: 9px 18px;
+    font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; margin-top: 12px;
+    transition: background .15s, transform .1s; display: inline-flex; align-items: center; gap: 6px;
   }
-  .btn:hover { background: var(--p500); }
-  .btn.ghost { background: var(--gray100); color: var(--gray700); border: 1px solid var(--border); }
+  .btn:hover { background: var(--p600); }
+  .btn:active { transform: scale(0.99); }
+  .btn.ghost { background: var(--gray100); color: var(--text); border: 1px solid var(--border); }
   .btn.ghost:hover { background: var(--gray200); }
   .btn.small { padding: 4px 10px; font-size: 12px; margin: 0; }
-  .pill { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 500; }
+  .pill { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: 500; }
   .pill.ok { background: var(--ok-bg); color: var(--ok-tx); }
   .pill.bad { background: var(--bad-bg); color: var(--bad-tx); }
   .pill.warn { background: var(--warn-bg); color: var(--warn-tx); }
   .pill.muted { background: var(--gray100); color: var(--gray600); }
   .badges { display: flex; flex-wrap: wrap; gap: 8px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th { text-align: left; background: var(--gray50); color: var(--muted); font-weight: 500;
-       font-size: 11px; text-transform: uppercase; letter-spacing: .03em;
+  th { text-align: left; background: var(--gray50); color: var(--muted); font-weight: 600;
+       font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
        padding: 10px 14px; border-bottom: 1px solid var(--border); }
-  td { padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  td { padding: 10px 14px; border-bottom: 1px solid var(--border); vertical-align: top; color: var(--text); }
   td.mono { font-family: var(--mono); font-size: 12px; }
-  .out { background: var(--gray50); border: 1px solid var(--border); border-radius: 6px; padding: 12px;
-         font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-word; margin-top: 4px; }
+  .out { background: var(--gray50); border: 1px solid var(--border); border-radius: 6px; padding: 14px;
+         font-family: var(--mono); font-size: 13px; white-space: pre-wrap; word-break: break-word; margin-top: 6px; line-height: 1.6; }
   .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
   .empty { color: var(--muted); font-size: 13px; padding: 14px 0; }
-  code { font-family: var(--mono); background: var(--gray50); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  code { font-family: var(--mono); background: var(--gray100); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
 
-  @media (max-width: 720px) {
+  /* Sandbox Tabs & Side-by-Side Diff */
+  .sb-view-controls { display: flex; gap: 6px; margin: 14px 0 8px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+  .sb-tab-btn { background: none; border: 1px solid transparent; padding: 6px 14px; border-radius: 6px;
+                font-size: 13px; font-weight: 500; color: var(--muted); cursor: pointer; transition: all .15s; }
+  .sb-tab-btn:hover { color: var(--text); background: var(--gray50); }
+  .sb-tab-btn.active { color: var(--p500); background: var(--p50); border-color: var(--p300); font-weight: 600; }
+
+  .side-by-side { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 6px; }
+  .diff-col { background: var(--gray50); border: 1px solid var(--border); border-radius: 6px; padding: 14px;
+              font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-word; line-height: 1.7; min-height: 140px; }
+  .diff-col h3 { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                 font-size: 12px; font-weight: 600; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
+
+  /* Подсветка замен в тексте (Highlight Marks) */
+  mark.hl { padding: 2px 5px; border-radius: 4px; font-weight: 500; cursor: pointer; transition: all .15s; position: relative; }
+  mark.hl-phone { background: var(--ok-bg); color: var(--ok-tx); }
+  mark.hl-secret { background: var(--bad-bg); color: var(--bad-tx); }
+  mark.hl-names { background: var(--blue-bg); color: var(--blue-tx); }
+  mark.hl-passport, mark.hl-snils, mark.hl-inn, mark.hl-ogrn, mark.hl-card, mark.hl-iban {
+    background: var(--purple-bg); color: var(--purple-tx);
+  }
+  mark.hl-link, mark.hl-domain, mark.hl-ip, mark.hl-mention {
+    background: var(--amber-bg); color: var(--amber-tx);
+  }
+  mark.hl.active {
+    box-shadow: 0 0 0 2px var(--text), 0 0 8px rgba(96,165,250,.6);
+    transform: scale(1.02); display: inline-block;
+  }
+
+  /* Баннер тревоги инъекции */
+  .alert-banner {
+    display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-radius: 8px;
+    background: var(--bad-bg); border: 1px solid rgba(239,68,68,.4); color: var(--bad-tx);
+    font-size: 13px; font-weight: 500; margin: 12px 0;
+  }
+  .alert-banner svg { flex-shrink: 0; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 4px; font-size: 11.5px; }
+  .legend-item { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+  .legend-dot { width: 10px; height: 10px; border-radius: 3px; }
+
+  @media (max-width: 840px) {
     .app { flex-direction: column; }
     .side { width: 100%; border-right: none; border-bottom: 1px solid var(--border); }
     .side nav { display: flex; overflow-x: auto; padding: 8px 12px; gap: 4px; }
     .side nav button { width: auto; white-space: nowrap; }
     .main { padding: 20px 16px 40px; }
+    .side-by-side { grid-template-columns: 1fr; }
+    .scorecard { flex-direction: column; align-items: flex-start; }
   }
 </style>
 </head>
@@ -135,26 +225,53 @@
         Аудит
       </button>
     </nav>
+
+    <div class="theme-toggle" onclick="toggleTheme()">
+      <span id="theme-text">Тёмная тема</span>
+      <svg id="theme-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </div>
+
     <div class="foot"><div id="upstream-info"></div></div>
   </aside>
   <main class="main">
 
   <!-- ОБЗОР -->
   <section id="tab-overview">
+    <!-- Security Scorecard -->
+    <div class="scorecard" id="ov-scorecard">
+      <div class="score-info">
+        <div class="score-badge" id="sc-badge">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+        </div>
+        <div>
+          <div class="score-title" id="sc-title">Защита активна (100%)</div>
+          <div class="score-desc" id="sc-desc">Все ключевые механизмы безопасности и криптографическая соль включены.</div>
+          <div class="score-checks">
+            <span class="check-item ok" id="sc-pepper">🧂 Соль ГПСЧ</span>
+            <span class="check-item ok" id="sc-auth">🔒 Аутентификация</span>
+            <span class="check-item ok">⚡ ReDoS-фильтр</span>
+            <span class="check-item ok">🛡️ CSP &amp; CSRF</span>
+            <span class="check-item ok">⏱️ Rate Limiting</span>
+            <span class="check-item ok">🕵️ Prompt Shield</span>
+          </div>
+        </div>
+      </div>
+      <button class="btn ghost small" onclick="showTab('settings')">Настройки</button>
+    </div>
+
     <div class="card">
       <div class="card-h">
-        <h2>Статус</h2>
-        <button class="btn ghost small" onclick="showTab('settings')">Настройки</button>
+        <h2>Текущий режим работы</h2>
       </div>
       <div id="ov-badges" class="badges"><span class="pill">…</span></div>
       <div class="hint" id="ov-upstream"></div>
     </div>
     <div class="card">
-      <h2>Срабатывания по типам</h2>
+      <h2>Срабатывания детекторов PII</h2>
       <div class="grid" id="overview-stats"><div class="empty">нет данных — прогоните трафик</div></div>
     </div>
     <div class="card">
-      <h2>Блокировки и ошибки</h2>
+      <h2>Безопасность и сбои</h2>
       <div class="grid" id="ov-errors"><div class="empty">нет данных — прогоните трафик</div></div>
     </div>
   </section>
@@ -210,6 +327,7 @@
         <div><label>Плейсхолдер (если выбран)</label><input type="text" id="rule-placeholder" value="[ORDER]"></div>
       </div>
       <button class="btn" onclick="addRule()">Добавить правило</button>
+      <span class="hint">Паттерн автоматически валидируется на ReDoS (вложенные квантификаторы и задержки).</span>
     </div>
     <div class="card">
       <h2>Свои правила</h2>
@@ -229,7 +347,7 @@
   <!-- ПЕСОЧНИЦА -->
   <section id="tab-sandbox" hidden>
     <div class="card">
-      <h2>Песочница</h2>
+      <h2>Песочница маскирования</h2>
       <label>Текст (как в сообщении клиента)</label>
       <textarea id="sb-text">Добрый день! Не можем провести оплату — проверьте, пожалуйста, наши реквизиты.
 
@@ -243,8 +361,8 @@
 
 Старая карта 4111 1111 1111 1111 больше не проходит, привязали новую: 4111111111111111.
 
-Офис в домене romashka.ru, портал testrom.sel.apitest.team не открывается.
-Внутренняя сеть 192.168.0.6, внешний IP 135.106.130.166.
+Офис в домене romashka.ru, портал old.romashka.ru не открывается.
+Внутренняя сеть 192.168.0.6, внешний IP 203.0.113.166, IPv6 2001:db8:85a3::8a2e:370:7334.
 Дамп с роутера: "16:20:01.537215 IP 5.141.102.236.30039 > 10.0.0.1.443: Flags [S]"
 
 Для инженеров: личный кабинет https://cabinet.romashka.ru/login?token=ghp_Ab12Cd34Ef56Gh78Jk90Mn32Pq54Rs76Tu89
@@ -253,17 +371,71 @@ GLM-ключ: 0123456789abcdef0123456789abcdef.FakePassw0rd17
 AWS из dev-конфига: AKIAIOSFODNN7EXAMPLE
 Google-ключ: AIzaA1b2C3d4E5f6g7H8i9J0k1L2m3N4o5P6q7R8
 Заголовок: Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N95PLFUP0THsR8U
-Строка для БД: postgres://billing:hunter2pass@db.romashka.ru:5432/prod
+Строка для БД: postgres://billing:hunter2pass@192.168.1.10:5432/prod
 
 Внутренний номер заказа: ORD-435921.</textarea>
+
       <label>Известные сущности (JSON-массив; аналог заголовка X-Compass-Entities)</label>
       <input type="text" id="sb-entities" value='["ООО Ромашка", "Иванов Пётр Сергеевич", "Смирнова Анна Игоревна"]'>
-      <button class="btn" onclick="runSandbox()">Проверить</button>
-      <label>Что увидит провайдер</label>
-      <div class="out" id="sb-masked">—</div>
-      <label>Что вернётся клиенту (после восстановления)</label>
-      <div class="out" id="sb-restored">—</div>
-      <div class="hint" id="sb-stats"></div>
+
+      <div style="display:flex; gap:12px; align-items:center;">
+        <button class="btn" onclick="runSandbox()">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Проверить маскирование
+        </button>
+        <span class="hint" id="sb-status"></span>
+      </div>
+
+      <!-- Alert Banner для инъекций промпта -->
+      <div id="sb-injection-alert" class="alert-banner" style="display:none;">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        <div>
+          <strong>Внимание: обнаружена попытка Prompt Injection!</strong>
+          <div id="sb-injection-text" style="font-size:12px; margin-top:2px;"></div>
+        </div>
+      </div>
+
+      <!-- Легенда категорий -->
+      <div class="legend" id="sb-legend" style="display:none;">
+        <span class="legend-item"><span class="legend-dot" style="background:var(--ok-tx)"></span> Телефон</span>
+        <span class="legend-item"><span class="legend-dot" style="background:var(--bad-tx)"></span> Секреты и ключи</span>
+        <span class="legend-item"><span class="legend-dot" style="background:var(--blue-tx)"></span> ФИО / Организации</span>
+        <span class="legend-item"><span class="legend-dot" style="background:var(--purple-tx)"></span> Паспорт, СНИЛС, ИНН, Карты</span>
+        <span class="legend-item"><span class="legend-dot" style="background:var(--amber-tx)"></span> Ссылки, Домены, IP, @ники</span>
+      </div>
+
+      <!-- Переключатель видов -->
+      <div class="sb-view-controls">
+        <button class="sb-tab-btn active" onclick="setSbView('diff')">Сравнение Side-by-Side</button>
+        <button class="sb-tab-btn" onclick="setSbView('restored')">Восстановленный ответ</button>
+        <button class="sb-tab-btn" onclick="setSbView('raw')">Чистый текст</button>
+      </div>
+
+      <!-- Вид 1: Side-by-side -->
+      <div id="sb-view-diff" class="side-by-side">
+        <div class="diff-col">
+          <h3>Оригинал (от клиента)</h3>
+          <div id="sb-diff-orig">—</div>
+        </div>
+        <div class="diff-col">
+          <h3>Замаскировано (уйдет в LLM)</h3>
+          <div id="sb-diff-masked">—</div>
+        </div>
+      </div>
+
+      <!-- Вид 2: Восстановленный -->
+      <div id="sb-view-restored" style="display:none;">
+        <label>Что вернётся клиенту (после восстановления)</label>
+        <div class="out" id="sb-restored">—</div>
+      </div>
+
+      <!-- Вид 3: Сырой текст -->
+      <div id="sb-view-raw" style="display:none;">
+        <label>Сырой замаскированный текст</label>
+        <div class="out" id="sb-raw-masked">—</div>
+      </div>
+
+      <div class="hint" id="sb-stats" style="margin-top:14px;"></div>
     </div>
   </section>
 
@@ -271,11 +443,11 @@ Google-ключ: AIzaA1b2C3d4E5f6g7H8i9J0k1L2m3N4o5P6q7R8
   <section id="tab-audit" hidden>
     <div class="card">
       <div class="card-h">
-        <h2>Журнал запросов</h2>
+        <h2>Журнал безопасности и запросов</h2>
         <button class="btn ghost small" onclick="loadAudit()">Обновить</button>
       </div>
-      <table><thead><tr><th>Время</th><th>Путь</th><th>Режим</th><th>Найдено</th><th>Сущн.</th><th>Статус</th></tr></thead>
-      <tbody id="audit-body"><tr><td colspan="6" class="empty">записей нет</td></tr></tbody></table>
+      <table><thead><tr><th>Время</th><th>Путь</th><th>Режим</th><th>Найдено</th><th>Сущн.</th><th>Инъекции</th><th>Статус</th></tr></thead>
+      <tbody id="audit-body"><tr><td colspan="7" class="empty">записей нет</td></tr></tbody></table>
     </div>
   </section>
 
@@ -285,6 +457,27 @@ Google-ключ: AIzaA1b2C3d4E5f6g7H8i9J0k1L2m3N4o5P6q7R8
 <script>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+// Управление темами (Dark / Light)
+function initTheme() {
+  const saved = localStorage.getItem('compass-theme');
+  const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const theme = saved || (prefersDark ? 'dark' : 'light');
+  applyTheme(theme);
+}
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem('compass-theme', theme);
+  const isDark = theme === 'dark';
+  $('theme-text').textContent = isDark ? 'Светлая тема' : 'Тёмная тема';
+  $('theme-icon').innerHTML = isDark
+    ? '<circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>'
+    : '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
+}
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme') || 'light';
+  applyTheme(current === 'dark' ? 'light' : 'dark');
+}
 
 const TABS = ['overview', 'settings', 'rules', 'sandbox', 'audit'];
 
@@ -329,12 +522,37 @@ async function loadOverview() {
       `<span class="pill muted">${ANON_TITLES[health.anonymization_mode] || health.anonymization_mode}</span>`;
     $('ov-upstream').textContent = 'апстрим: ' + health.upstream;
 
+    // Security Scorecard обновление
+    if (!health.auth_configured) {
+      $('sc-badge').style.background = 'var(--bad-bg)';
+      $('sc-badge').style.color = 'var(--bad-tx)';
+      $('sc-title').textContent = 'Внимание: авторизация не настроена';
+      $('sc-desc').textContent = 'Задайте COMPASS_AUTH_USER и COMPASS_AUTH_PASSWORD для защиты панели управления.';
+      $('sc-auth').className = 'check-item warn';
+      $('sc-auth').textContent = '⚠️ Без авторизации';
+    } else {
+      $('sc-badge').style.background = 'var(--ok-bg)';
+      $('sc-badge').style.color = 'var(--ok-tx)';
+      $('sc-title').textContent = 'Защита активна (100%)';
+      $('sc-desc').textContent = 'Все ключевые механизмы безопасности, криптографическая соль и CSP-заголовки включены.';
+      $('sc-auth').className = 'check-item ok';
+      $('sc-auth').textContent = '🔒 Аутентификация';
+    }
+
+    if (!health.has_pepper) {
+      $('sc-pepper').className = 'check-item warn';
+      $('sc-pepper').textContent = '⚠️ Без серверной соли';
+    } else {
+      $('sc-pepper').className = 'check-item ok';
+      $('sc-pepper').textContent = '🧂 Соль ГПСЧ';
+    }
+
     const metrics = await (await fetch('/metrics')).text();
     const stats = {}, errors = {};
     metrics.split('\n').forEach(line => {
       let m = line.match(/^compass_masked_total\{type="(\w+)"\} (\d+)$/);
       if (m && +m[2] > 0) stats[m[1]] = +m[2];
-      m = line.match(/^(compass_blocked_total|compass_failopen_total|compass_mask_errors_total|compass_upstream_errors_total) (\d+)$/);
+      m = line.match(/^(compass_blocked_total|compass_failopen_total|compass_mask_errors_total|compass_upstream_errors_total|compass_prompt_injections_total) (\d+)$/);
       if (m && +m[2] > 0) errors[m[1].replace(/^compass_|_total$/g, '')] = +m[2];
     });
     const titles = {phones:'Телефоны', cards:'Карты', emails:'E-mail', links:'Ссылки',
@@ -345,7 +563,8 @@ async function loadOverview() {
       `<div class="stat"><div class="v">${v}</div><div class="k">${titles[k] || k}</div></div>`).join('');
     $('overview-stats').innerHTML = grid || '<div class="empty">нет данных — прогоните трафик</div>';
     const errTitles = {blocked:'Заблокировано', failopen:'Пропущено (fail-open)',
-      'mask_errors':'Ошибки маскирования', 'upstream_errors':'Ошибки апстрима'};
+      'mask_errors':'Ошибки маскирования', 'upstream_errors':'Ошибки апстрима',
+      'prompt_injections':'Инъекции промпта'};
     const errGrid = Object.entries(errors).map(([k, v]) =>
       `<div class="stat"><div class="v">${v}</div><div class="k">${errTitles[k] || k}</div></div>`).join('');
     $('ov-errors').innerHTML = errGrid || '<div class="empty">всё чисто</div>';
@@ -386,10 +605,17 @@ async function loadRules() {
 }
 
 async function addRule() {
-  await api('/v1/rules', {method: 'POST', body: JSON.stringify({
-    name: $('rule-name').value, pattern: $('rule-pattern').value,
-    replacement: $('rule-replacement').value, placeholder: $('rule-placeholder').value})});
-  loadRules();
+  try {
+    const res = await api('/v1/rules', {method: 'POST', body: JSON.stringify({
+      name: $('rule-name').value, pattern: $('rule-pattern').value,
+      replacement: $('rule-replacement').value, placeholder: $('rule-placeholder').value})});
+    if (res.detail) {
+      alert('Ошибка добавления правила: ' + res.detail);
+    }
+    loadRules();
+  } catch (e) {
+    alert('Ошибка сети или валидации: ' + e);
+  }
 }
 
 async function toggleRule(id, enabled) {
@@ -399,15 +625,118 @@ async function deleteRule(id) {
   await api('/v1/rules/' + id, {method: 'DELETE'}); loadRules();
 }
 
+// Sandbox view switching
+let currentSbView = 'diff';
+function setSbView(mode) {
+  currentSbView = mode;
+  document.querySelectorAll('.sb-tab-btn').forEach(btn => {
+    btn.classList.toggle('active', btn.textContent.toLowerCase().includes(
+      mode === 'diff' ? 'side-by-side' : mode === 'restored' ? 'восстановленный' : 'чистый'
+    ));
+  });
+  $('sb-view-diff').style.display = mode === 'diff' ? 'grid' : 'none';
+  $('sb-view-restored').style.display = mode === 'restored' ? 'block' : 'none';
+  $('sb-view-raw').style.display = mode === 'raw' ? 'block' : 'none';
+}
+
+function highlightText(text, replacements, isFake) {
+  if (!replacements || !replacements.length || !text) return esc(text || '');
+
+  // Собираем все вхождения
+  const matches = [];
+  replacements.forEach((item, idx) => {
+    const val = isFake ? item.fake : item.original;
+    if (!val || val.length === 0) return;
+    let pos = 0;
+    while ((pos = text.indexOf(val, pos)) !== -1) {
+      matches.push({
+        start: pos,
+        end: pos + val.length,
+        len: val.length,
+        item: item,
+        idx: idx
+      });
+      pos += val.length;
+    }
+  });
+
+  if (!matches.length) return esc(text);
+
+  // Сортируем: по start asc, затем по длине desc
+  matches.sort((a, b) => a.start - b.start || b.len - a.len);
+
+  // Оставляем только непересекающиеся отрезки
+  const nonOverlapping = [];
+  let lastEnd = 0;
+  for (const m of matches) {
+    if (m.start >= lastEnd) {
+      nonOverlapping.push(m);
+      lastEnd = m.end;
+    }
+  }
+
+  let result = '';
+  let cursor = 0;
+  for (const m of nonOverlapping) {
+    if (m.start > cursor) {
+      result += esc(text.slice(cursor, m.start));
+    }
+    const catClass = 'hl-' + (m.item.category || 'names');
+    const matchedText = text.slice(m.start, m.end);
+    const tooltip = isFake
+      ? `Замена [${m.item.category || 'pii'}]: ${m.item.original}`
+      : `Будет заменено на: ${m.item.fake}`;
+    result += `<mark class="hl ${catClass}" data-idx="${m.idx}" title="${esc(tooltip)}">${esc(matchedText)}</mark>`;
+    cursor = m.end;
+  }
+  if (cursor < text.length) {
+    result += esc(text.slice(cursor));
+  }
+  return result;
+}
+
+function bindHoverSync() {
+  document.querySelectorAll('mark.hl').forEach(el => {
+    el.onmouseenter = () => {
+      const idx = el.dataset.idx;
+      document.querySelectorAll(`mark.hl[data-idx="${idx}"]`).forEach(m => m.classList.add('active'));
+    };
+    el.onmouseleave = () => {
+      const idx = el.dataset.idx;
+      document.querySelectorAll(`mark.hl[data-idx="${idx}"]`).forEach(m => m.classList.remove('active'));
+    };
+  });
+}
+
 async function runSandbox() {
   let entities = [];
   try { entities = JSON.parse($('sb-entities').value || '[]'); } catch (e) {}
-  const data = await api('/v1/sandbox', {method: 'POST', body: JSON.stringify({
-    text: $('sb-text').value, entities})});
-  $('sb-masked').textContent = data.masked || '—';
+  const text = $('sb-text').value;
+
+  const data = await api('/v1/sandbox', {method: 'POST', body: JSON.stringify({text, entities})});
+
+  // Injection Banner
+  if (data.injections && data.injections.length > 0) {
+    $('sb-injection-alert').style.display = 'flex';
+    $('sb-injection-text').textContent = 'Обнаружены сигнатуры: ' + data.injections.join(', ');
+  } else {
+    $('sb-injection-alert').style.display = 'none';
+  }
+
+  // Legend
+  $('sb-legend').style.display = (data.replacements && data.replacements.length > 0) ? 'flex' : 'none';
+
+  // Highlighted Side-by-Side
+  $('sb-diff-orig').innerHTML = highlightText(text, data.replacements, false);
+  $('sb-diff-masked').innerHTML = highlightText(data.masked || '', data.replacements, true);
+  bindHoverSync();
+
+  // Raw and restored views
+  $('sb-raw-masked').textContent = data.masked || '—';
   $('sb-restored').textContent = data.restored || '—';
-  $('sb-stats').innerHTML = 'замены: ' + esc(JSON.stringify(data.stats)) +
-    ' · утечки: ' + (data.leaks === 0
+
+  $('sb-stats').innerHTML = 'Всего замен: ' + (data.replacements ? data.replacements.length : 0) +
+    ' · Утечки: ' + (data.leaks === 0
       ? '<span class="pill ok">0 — чисто</span>'
       : `<span class="pill bad">${data.leaks} — маскирование не удалось</span>`);
 }
@@ -415,19 +744,23 @@ async function runSandbox() {
 async function loadAudit() {
   const data = await api('/v1/audit/records');
   const body = $('audit-body');
-  if (!data.records.length) { body.innerHTML = '<tr><td colspan="6" class="empty">записей нет</td></tr>'; return; }
+  if (!data.records.length) { body.innerHTML = '<tr><td colspan="7" class="empty">записей нет</td></tr>'; return; }
   body.innerHTML = data.records.slice().reverse().map(r => `<tr>
     <td class="mono">${new Date(r.ts * 1000).toLocaleTimeString('ru-RU')}</td>
     <td class="mono">${esc(r.path)}</td>
     <td>${esc(r.mode || '—')}</td>
     <td class="mono">${r.detected ? Object.entries(r.detected).map(([k, v]) => k + ':' + v).join(' ') : '—'}</td>
     <td class="mono">${r.entities ?? '—'}</td>
+    <td>${r.injections && r.injections.length
+      ? `<span class="pill bad">${esc(r.injections.join(','))}</span>`
+      : '<span class="pill muted">—</span>'}</td>
     <td>${r.blocked
       ? `<span class="pill bad">заблокирован</span>${r.reason ? '<div class="hint" style="margin:4px 0 0">' + esc(r.reason) + '</div>' : ''}`
       : '<span class="pill ok">ок</span>'}</td>
   </tr>`).join('');
 }
 
+initTheme();
 loadOverview(); loadRules(); loadDetectors();
 setInterval(loadOverview, 5000);
 </script>

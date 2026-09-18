@@ -23,8 +23,12 @@ RE_OGRNIP = re.compile(r"(?<!\d)\d{15}(?!\d)")
 RE_OGRN = re.compile(r"(?<!\d)\d{13}(?!\d)")
 RE_INN12 = re.compile(r"(?<!\d)\d{12}(?!\d)")
 RE_INN10 = re.compile(r"(?<!\d)\d{10}(?!\d)")
-# паспорт: контрольной суммы нет, поэтому только явная форма с пробелом
-RE_PASSPORT = re.compile(r"(?<!\d)\d{4} \d{6}(?!\d)")
+# паспорт: серия (4 цифры) и номер (6 цифр) с пробелом, дефисом или символом №
+RE_PASSPORT = re.compile(r"(?<!\d)\d{4}(?:[ \-]| ?№ ?)\d{6}(?!\d)")
+# паспорт в явном контексте: 10 цифр слитно после слова «паспорт» / «серия»
+RE_PASSPORT_CTX = re.compile(
+    r"(?i)\b((?:паспорт\w*|паспортные\s+данные|сери[яи]\s+паспорта)\s*(?:№\s*|:\s*)?)(?<!\d)(\d{10})(?!\d)"
+)
 # IBAN: страна + 2 контрольные + BBAN группами по 2-4
 RE_IBAN = re.compile(r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]{2,4}){2,8}\b")
 
@@ -105,6 +109,7 @@ RULES = [
     ("inns12", RE_INN12, _digits_of, inn_ok, fake_inn12, "[INN]"),
     ("inns", RE_INN10, _digits_of, inn_ok, fake_inn10, "[INN]"),
     ("passports", RE_PASSPORT, _digits_of, lambda d: True, fake_number, "[PASSPORT]"),
+    ("passports_ctx", RE_PASSPORT_CTX, _digits_of, lambda d: True, fake_number, "[PASSPORT]"),
     ("ibans", RE_IBAN, _alnum_of, iban_ok, fake_iban, "[IBAN]"),
 ]
 
@@ -122,6 +127,16 @@ def apply(s: str, anon, only: tuple = (), skip: tuple = (), mark_late: bool = Fa
 
         def repl(m: re.Match, _x=extract, _v=validate, _f=make_fake,
                  _p=placeholder, _k=stat_key) -> str:
+            if _k == "passports_ctx":
+                prefix = m.group(1)
+                original = m.group(2)
+                candidate = _x(original)
+                fake_value = _f(original, candidate) if anon.fake else _p
+                anon._record(original, fake_value)
+                anon.stats["passports"] = anon.stats.get("passports", 0) + 1
+                out = anon._secret_mark(fake_value) if mark_late else fake_value
+                return prefix + out
+
             original = m.group(0)
             candidate = _x(original)
             if not _v(candidate):

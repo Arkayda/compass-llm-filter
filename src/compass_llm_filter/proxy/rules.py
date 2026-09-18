@@ -59,6 +59,31 @@ class CustomRule:
         }
 
 
+DANGEROUS_NESTED = re.compile(
+    r"\((?:\?[a-zA-Z0-9_:=!<>]+)?[^)]*(\+|\*|\?|\{\d+,?\d*\})[^)]*\)\s*(\+|\*|\{\d+,?\d*\})"
+)
+
+
+def validate_safe_regex(pattern: str) -> None:
+    """Защита от ReDoS (catastrophic backtracking): проверка структуры квантификаторов
+    и тестовый прогон на повторяющихся строках."""
+    if not pattern:
+        raise ValueError("pattern is required")
+    if len(pattern) > 300:
+        raise ValueError("pattern too long (max 300 characters)")
+    if DANGEROUS_NESTED.search(pattern):
+        raise ValueError("potentially vulnerable regex (nested quantifiers detected)")
+    try:
+        compiled = re.compile(pattern)
+    except re.error as exc:
+        raise ValueError(f"invalid regex: {exc}") from exc
+    for s in ("a" * 18 + "!", "1" * 18 + "!", " " * 18 + "!"):
+        t0 = time.perf_counter()
+        compiled.search(s)
+        if time.perf_counter() - t0 > 0.015:
+            raise ValueError("regex execution timeout (catastrophic backtracking risk)")
+
+
 class State:
     """Настройки (меняются через API), правила, аудит, метрики."""
 
@@ -113,7 +138,9 @@ class State:
         }
         tmp = self.settings.state_file + ".tmp"
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            fd = os.open(tmp, flags, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=1)
             os.replace(tmp, self.settings.state_file)
         except OSError:
@@ -121,12 +148,7 @@ class State:
 
     def add_rule(self, data: dict) -> CustomRule:
         pattern = data.get("pattern") or ""
-        if not pattern:
-            raise ValueError("pattern is required")
-        try:
-            re.compile(pattern)
-        except re.error as exc:
-            raise ValueError(f"invalid regex: {exc}") from exc
+        validate_safe_regex(pattern)
         replacement = data.get("replacement", "placeholder")
         if replacement not in ("placeholder", "fake"):
             raise ValueError("replacement must be placeholder|fake")

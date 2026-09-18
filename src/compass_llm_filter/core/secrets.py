@@ -19,8 +19,10 @@ PLACEHOLDER = "[SECRET]"
 # kv — группу 2 между меткой (группа 1) и хвостом (группа 3)
 # (имя, regex, режим)
 RULES: list[tuple[str, re.Pattern, str]] = [
-    # приватные ключи: маркер начала блока
-    ("private_key", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----"), "whole"),
+    # приватные ключи: блок целиком или отдельный заголовок
+    ("private_key", re.compile(
+        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----(?:[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----)?"
+    ), "whole"),
     # OpenAI и совместимые
     ("openai_key", re.compile(r"\bsk-(?:proj-)?[A-Za-z0-9_-]{16,}\b"), "whole"),
     # GitHub tokens
@@ -48,10 +50,11 @@ RULES: list[tuple[str, re.Pattern, str]] = [
         r"\s*[:=]\s*[\"']?)([A-Za-z0-9+/_=-]{12,})([\"']?)"), "kv"),
     # connection string: scheme://user:PASSWORD@HOST; хост отдельной группой —
     # доменная фаза домены после @ не трогает (часть e-mail), а хост БД
-    # утечь не должен
+    # утечь не должен (поддерживаются домены, IPv4 и IPv6)
     ("conn_string", re.compile(
         r"\b([a-z][a-z0-9+.-]*://[^/@\s:]+:)([^@\s]+)(@)"
-        r"([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,14})"), "conn"),
+        r"([A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,14}"
+        r"|\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-fA-F:]+\])"), "conn"),
 ]
 
 
@@ -70,11 +73,29 @@ def _fake_for(real: str) -> str:
     if len(prefix) > 10:
         m2 = _RE_PREFIX_SHORT.match(real)
         prefix = m2.group(0) if m2 else ""
-    return prefix + _junk(det_rng("secret", real), len(real) - len(prefix))
+    rng = det_rng("secret", real)
+    if "\n" in real:
+        return "".join(rng.choice(_ALNUM) if ch.isalnum() else ch for ch in real)
+    return prefix + _junk(rng, len(real) - len(prefix))
 
 
 def _fake_host(host: str) -> str:
-    """Фейк-хост в стиле доменной фазы."""
+    """Фейк-хост: IP-адреса заменяются фейковыми IP, домены — example.com."""
+    parts = host.split(".")
+    if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+        rng = det_rng("ip", host)
+        o = [int(p) for p in parts]
+        if o[0] == 10:
+            return f"10.{rng.randrange(0, 255)}.{rng.randrange(0, 255)}.{rng.randrange(1, 255)}"
+        if o[0] == 192 and o[1] == 168:
+            return f"192.168.{rng.randrange(0, 255)}.{rng.randrange(1, 255)}"
+        if o[0] == 172 and 16 <= o[1] <= 31:
+            return f"172.{rng.randrange(16, 32)}.{rng.randrange(0, 255)}.{rng.randrange(1, 255)}"
+        base = rng.choice(["192.0.2.", "198.51.100.", "203.0.113."])
+        return base + str(rng.randrange(1, 255))
+    if host.startswith("[") and host.endswith("]"):
+        code = hashlib.sha256(host.lower().encode()).hexdigest()[:4]
+        return f"[2001:db8::{code}]"
     code = hashlib.sha256(host.lower().encode()).hexdigest()[:8]
     labels = host.split(".")
     if len(labels) >= 3:

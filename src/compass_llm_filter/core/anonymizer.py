@@ -11,8 +11,10 @@ USER_1, обратная замена только для однозначных
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import random
 import re
+import uuid
 
 # --- Регулярки для чувствительных фрагментов в текстах ---
 RE_LINK = re.compile(r"(?:https?://|www\.|t\.me/)[^\s,;)\]}\u00bb\"'<>]+", re.IGNORECASE)
@@ -22,6 +24,7 @@ RE_MENTION = re.compile(r"(?<![\w.@-])@[A-Za-z0-9_]{3,}")
 # (?!\.\d+\.): tcpdump пишет адрес с портом через точку (5.141.102.236.30039) —
 # матчится IP, порт остаётся; заодно отсекаются цепочки вида 1.2.3.4.5.6
 RE_IP = re.compile(r"(?<!\d)(?<!\d\.)(\d{1,3}(?:\.\d{1,3}){3})(?!\d)(?!\.\d+\.)")
+RE_IPV6_CAND = re.compile(r"(?<![A-Fa-f0-9:])([0-9a-fA-F:]{3,39})(?![A-Fa-f0-9:])")
 # голые домены; "@" в lookbehind — домен сразу после @ это часть e-mail,
 # в том числе уже вставленного фейкового
 RE_DOMAIN = re.compile(
@@ -128,9 +131,9 @@ def _ru_identifier(digits: str) -> bool:
 
 
 def _defer_to_ru_pii(cand: str) -> bool:
-    """СНИЛС/ИНН/ОГРН с валидной суммой или паспорт (4 цифры, пробел, 6)."""
+    """СНИЛС/ИНН/ОГРН с валидной суммой или паспорт."""
     digits = "".join(ch for ch in cand if ch.isdigit())
-    return _ru_identifier(digits) or re.fullmatch(r"\d{4} \d{6}", cand) is not None
+    return _ru_identifier(digits) or re.fullmatch(r"\d{4}(?:[ \-]| ?№ ?)\d{6}", cand) is not None
 
 
 def _is_domain_like(d: str) -> bool:
@@ -151,6 +154,7 @@ class Anonymizer:
         if mode not in ("fake", "placeholders"):
             raise ValueError(f"Unknown anonymization mode: {mode}")
         self.fake = mode == "fake"
+        self._nonce = uuid.uuid4().hex[:8]
         self.name_map: dict[str, str] = {}
         self._used_aliases: set[str] = set()
         self._substitutions: list[tuple[str, str]] = []  # (реальное, фейковое)
@@ -191,11 +195,11 @@ class Anonymizer:
         self._substitutions.append((real, fake_value))
 
     def _secret_mark(self, fake_value: str) -> str:
-        """Секрет -> маркер \x00sN\x00, фейк подставится в конце
+        """Секрет -> маркер \x00s_nonce_N\x00, фейк подставится в конце
         sanitize_string. Без маркера фейк-пароль в postgres://user:FAKE@host
         маскировался бы повторно как e-mail и ломал восстановление."""
         self._secret_values.append(fake_value)
-        return f"\x00s{len(self._secret_values) - 1}\x00"
+        return f"\x00s_{self._nonce}_{len(self._secret_values) - 1}\x00"
 
     # --- карты соответствий ---
 
@@ -294,12 +298,12 @@ class Anonymizer:
         lat_items = [(r, a) for r, a in full_sorted
                      if _textual(r) and re.search(r"[A-Za-z]", r)]
 
-        # маркерные фазы: real -> \x00N\x00 -> подстановка
+        # маркерные фазы: real -> \x00m_nonce_N\x00 -> подстановка
         values: list[str] = []
 
         def mark(val: str) -> str:
             values.append(val)
-            return f"\x00{len(values) - 1}\x00"
+            return f"\x00m_{self._nonce}_{len(values) - 1}\x00"
 
         full_alts = "|".join(re.escape(r) for r, _ in cyr_items)
         full_re = re.compile(rf"\b(?:{full_alts})\b") if full_alts else None
@@ -313,7 +317,7 @@ class Anonymizer:
             lat_re = re.compile(rf"(?<!{CODE_BOUND})@?(?:{lat_alts})(?!{CODE_BOUND})")
             lat_marks = {r: mark(a) for r, a in lat_items}
 
-        ph_re = re.compile(r"\x00(\d+)\x00")
+        ph_re = re.compile(rf"\x00m_{self._nonce}_(\d+)\x00")
 
         def decode(m: re.Match) -> str:
             return values[int(m.group(1))]
@@ -462,6 +466,8 @@ class Anonymizer:
 
     def sanitize_string(self, s: str) -> str:
         """Замена имён по карте + телефоны/e-mail/ссылки/@упоминания/домены/IP."""
+        if "\x00" in s:
+            s = s.replace("\x00", "")
         self._secret_values = []  # маркеры секретов живут в рамках одного вызова
         if self._phases is None:
             self.prepare()
@@ -539,11 +545,37 @@ class Anonymizer:
         # идентификаторы после телефона: валидные СНИЛС/ИНН/ОГРН телефонная
         # фаза пропустила, фейки ru_pii повторно не матчятся
         s = ru_pii.apply(s, self, skip=("ibans",))
+
+        # IPv6 фаза
+        def repl_ipv6(m: re.Match) -> str:
+            cand = m.group(1)
+            if cand.count(":") < 2:
+                return cand
+            try:
+                ip = ipaddress.IPv6Address(cand)
+            except ValueError:
+                return cand
+            if not self.fake:
+                fake_val = "[IP]"
+            else:
+                rng = _det_rng("ipv6", cand)
+                h = lambda: f"{rng.randrange(0x1000, 0xffff):x}"
+                if ip.is_loopback:
+                    fake_val = "::1"
+                elif ip.is_private or ip.is_link_local:
+                    fake_val = f"fd{rng.randrange(0x10, 0xff):x}:{h()}:{h()}::{h()}"
+                else:
+                    fake_val = f"2001:db8:{h()}:{h()}::{h()}"
+            self._record(cand, fake_val)
+            self.stats["ips"] += 1
+            return fake_val
+
+        s = RE_IPV6_CAND.sub(repl_ipv6, s)
         s, n = RE_IP.subn(repl_ip, s); self.stats["ips"] += n
 
         # раскрытие маркеров секретов
         if self._secret_values:
-            s = re.sub(r"\x00s(\d+)\x00",
+            s = re.sub(rf"\x00s_{self._nonce}_(\d+)\x00",
                        lambda m: self._secret_values[int(m.group(1))], s)
 
         if self._phases:

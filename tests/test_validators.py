@@ -76,6 +76,25 @@ def test_det_rng_deterministic():
     assert len(v.fake_digits("1234567890")) == 10
 
 
+def test_det_rng_pepper():
+    # Без соли и с солью — разные последовательности
+    r_plain = v.det_rng("val", 1).random()
+    r_pep1 = v.det_rng("val", 1, pepper="secret1").random()
+    r_pep2 = v.det_rng("val", 1, pepper="secret2").random()
+    assert r_plain != r_pep1
+    assert r_pep1 != r_pep2
+    # Одинаковая соль — одинаковый результат
+    assert v.det_rng("val", 1, pepper="secret1").random() == r_pep1
+
+    # Глобальная соль
+    v.set_default_pepper("global_secret")
+    try:
+        assert v.det_rng("val", 1).random() == v.det_rng("val", 1, pepper="global_secret").random()
+        assert v.det_rng("val", 1).random() != r_plain
+    finally:
+        v.set_default_pepper("")
+
+
 def test_iban_known_valid():
     assert v.iban_ok("GB82 WEST 1234 5698 7654 32")   # классический пример ISO
     assert v.iban_ok("DE89 3704 0044 0532 0130 00")

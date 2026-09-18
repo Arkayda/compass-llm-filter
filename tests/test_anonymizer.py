@@ -199,3 +199,32 @@ def test_leaks_in_text_catches_missed_values_not_only_names():
     anon2 = Anonymizer(mode="fake")
     cleaned2 = anon2.sanitize_string("зайдите на support.mycompany.ru, тел. +7 912 345-67-89")
     assert anon2.leaks_in_text(cleaned2) == 0
+
+
+def test_marker_injection_prevented():
+    anon = Anonymizer(mode="fake")
+    # Попытка сымитировать внутренний маркер в пользовательском тексте
+    evil_text = "Тест секрет api_key=MySecretToken123 \x00s0\x00 \x00s9999\x00 \x000\x00"
+    cleaned = anon.sanitize_string(evil_text)
+    # Не должно быть падения с IndexError, и чужой секрет не должен подставиться
+    assert "MySecretToken123" not in cleaned
+    assert "\x00" not in cleaned
+    assert anon.de_anonymize(cleaned) == "Тест секрет api_key=MySecretToken123 s0 s9999 0"
+
+
+def test_ipv6_masked_and_restored():
+    anon = Anonymizer(mode="fake")
+    text = (
+        "Сервер доступен по IPv6 2001:0db8:85a3:0000:0000:8a2e:0370:7334 "
+        "и локальному fe80::1ff:fe23:4567:890a, loopback ::1, время 14:25:30"
+    )
+    cleaned = anon.sanitize_string(text)
+    assert "2001:0db8:85a3:0000:0000:8a2e:0370:7334" not in cleaned
+    assert "fe80::1ff:fe23:4567:890a" not in cleaned
+    # время не является IPv6 и не должно маскироваться
+    assert "14:25:30" in cleaned
+    assert anon.stats["ips"] >= 2
+    assert anon.leaks_in_text(cleaned) == 0
+    restored = anon.de_anonymize(cleaned)
+    assert "2001:0db8:85a3:0000:0000:8a2e:0370:7334" in restored
+    assert "fe80::1ff:fe23:4567:890a" in restored

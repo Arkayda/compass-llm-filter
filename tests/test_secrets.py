@@ -84,6 +84,24 @@ def test_private_key_header_faked():
     assert header not in cleaned
 
 
+def test_full_multiline_private_key_faked_and_restored():
+    anon = Anonymizer()
+    key = (
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n"
+        "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\n"
+        "QyNTUxOQAAACDNX+8p/g2GZQ8dZ2fK9bS51o4u48rZ0Zt1bZ98gqX7awAAAJBq7J00auyd\n"
+        "-----END OPENSSH PRIVATE KEY-----"
+    )
+    cleaned = anon.sanitize_string(f"конфиг сервера:\n{key}\nпроверьте доступ")
+    assert "b3BlbnNzaC1rZXktdjE" not in cleaned
+    assert "-----BEGIN OPENSSH PRIVATE KEY-----" not in cleaned
+    assert "-----END OPENSSH PRIVATE KEY-----" not in cleaned
+    assert anon.stats["secrets"] >= 1
+    assert anon.leaks_in_text(cleaned) == 0
+    restored = anon.de_anonymize(cleaned)
+    assert key in restored
+
+
 def test_glm_key_shape_faked():
     # ключ BigModel/GLM: 32 hex-символа, точка, пароль (здесь — синтетический)
     key = "0123456789abcdef0123456789abcdef.FakePassw0rd17"
@@ -115,3 +133,22 @@ def test_url_with_key_inside_faked_as_link():
     cleaned = anon.sanitize_string(f"запрос {url} вернул 200")
     assert "abc123def456ghi789" not in cleaned
     assert "example.com/" in cleaned  # фейковая ссылка
+
+
+def test_conn_string_with_ip_and_ipv6():
+    anon = Anonymizer()
+    # Строка подключения с IPv4 адресом
+    conn_ip = "db: postgres://admin:SuperSecretPass123@10.0.1.25:5432/production"
+    cleaned_ip = anon.sanitize_string(conn_ip)
+    assert "SuperSecretPass123" not in cleaned_ip
+    assert "10.0.1.25" not in cleaned_ip
+    assert "postgres://admin:" in cleaned_ip and ":5432/production" in cleaned_ip
+    assert anon.leaks_in_text(cleaned_ip) == 0
+    assert anon.de_anonymize(cleaned_ip) == conn_ip
+
+    # Строка подключения с IPv6 адресом
+    conn_ipv6 = "redis://user:MyRedisSecret@[2001:db8::1]:6379/0"
+    cleaned_ipv6 = anon.sanitize_string(conn_ipv6)
+    assert "MyRedisSecret" not in cleaned_ipv6
+    assert "2001:db8::1" not in cleaned_ipv6
+    assert anon.de_anonymize(cleaned_ipv6) == conn_ipv6

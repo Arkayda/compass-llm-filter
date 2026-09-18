@@ -10,3 +10,4 @@ console-dist/
 
 # внутренняя документация — не публикуется
 INTERNAL.md
+ARCHITECTURE.md

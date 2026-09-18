@@ -6,14 +6,25 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import random
 import re
 
+DEFAULT_PEPPER = os.environ.get("COMPASS_SECRET_PEPPER", "")
 
-def det_rng(*parts) -> random.Random:
-    """Детерминированный ГПСЧ: seed = SHA256 от склеенных частей, одинаковым
-    входам всегда одинаковые выходы."""
-    seed = hashlib.sha256("|".join(str(p) for p in parts).encode("utf-8")).hexdigest()
+
+def set_default_pepper(pepper: str) -> None:
+    """Установить глобальный серверный секрет (pepper) для ГПСЧ."""
+    global DEFAULT_PEPPER
+    DEFAULT_PEPPER = pepper
+
+
+def det_rng(*parts, pepper: str | None = None) -> random.Random:
+    """Детерминированный ГПСЧ: seed = SHA256 от склеенных частей с солью (pepper),
+    одинаковым входам всегда одинаковые выходы."""
+    p = DEFAULT_PEPPER if pepper is None else pepper
+    prefix = [f"pepper:{p}"] if p else []
+    seed = hashlib.sha256("|".join(prefix + [str(part) for part in parts]).encode("utf-8")).hexdigest()
     return random.Random(seed)
 
 

@@ -25,6 +25,8 @@ class Settings:
     state_file: str = ""             # опционально: JSON-файл состояния (настройки+правила)
     auth_user: str = ""              # basic-auth консоли/управляющего API (оба или ничего)
     auth_password: str = ""
+    secret_pepper: str = ""          # серверная соль ГПСЧ для защиты от rainbow-table подбора
+    strict_auth: bool = False        # требовать обязательную настройку basic-auth при старте
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -44,6 +46,8 @@ class Settings:
             state_file=env.get("COMPASS_STATE_FILE", ""),
             auth_user=env.get("COMPASS_AUTH_USER", ""),
             auth_password=env.get("COMPASS_AUTH_PASSWORD", ""),
+            secret_pepper=env.get("COMPASS_SECRET_PEPPER", ""),
+            strict_auth=env.get("COMPASS_STRICT_AUTH", "false").lower() in ("true", "1", "yes"),
         )
         if s.mode not in ("enforce", "detect"):
             raise ValueError(f"COMPASS_MODE must be enforce|detect, got {s.mode!r}")
