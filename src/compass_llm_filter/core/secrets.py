@@ -103,7 +103,11 @@ def _fake_host(host: str) -> str:
     return f"{code}.example.com"
 
 
-def apply(s: str, anon) -> str:
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from compass_llm_filter.core.anonymizer import Anonymizer
+
+def apply(s: str, anon: Anonymizer) -> str:
     """Маскировка секретов. Вместо фейка в текст ставится маркер \x00sN\x00,
     раскрывается в конце sanitize_string: иначе фейк-пароль в
     postgres://user:FAKE@host маскировался бы повторно как e-mail. В карту
@@ -121,9 +125,9 @@ def apply(s: str, anon) -> str:
             else:
                 value = m.group(0)
             fake_value = _fake_for(value) if anon.fake else PLACEHOLDER
-            anon._record(value, fake_value)
-            anon.stats["secrets"] = anon.stats.get("secrets", 0) + 1
-            mark = anon._secret_mark(fake_value)
+            anon.record_substitution(value, fake_value)
+            anon.record_stat("secrets")
+            mark = anon.get_secret_mark(fake_value)
             if _mode == "token":
                 return kept + mark
             if _mode == "kv":
@@ -131,8 +135,8 @@ def apply(s: str, anon) -> str:
             if _mode == "conn":
                 host = m.group(4)
                 fake_host = _fake_host(host) if anon.fake else "[DOMAIN]"
-                anon._record(host, fake_host)
-                return m.group(1) + mark + m.group(3) + anon._secret_mark(fake_host)
+                anon.record_substitution(host, fake_host)
+                return m.group(1) + mark + m.group(3) + anon.get_secret_mark(fake_host)
             return mark
         s = regex.sub(repl, s)
     return s

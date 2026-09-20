@@ -19,6 +19,13 @@ import pathlib
 import re
 import urllib.parse
 import uuid
+import asyncio
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+state_lock = asyncio.Lock()
 
 import httpx
 from fastapi import FastAPI, Request
@@ -293,26 +300,26 @@ def _restore_strings(obj, anon: Anonymizer, depth: int = 0):
     return obj
 
 
-def _apply_custom_rules(obj, anon: Anonymizer, state, depth: int = 0):
+def _apply_custom_rules(obj, anon: Anonymizer, rules, depth: int = 0):
     """Свои правила поверх встроенных фаз, по тем же строкам и ключам."""
     if depth > MAX_RECURSION_DEPTH:
         return obj
     if isinstance(obj, str):
-        for rule in state.rules.values():
+        for rule in rules:
             if rule.enabled:
                 obj = rule.apply(obj, anon)
         return obj
     if isinstance(obj, list):
-        return [_apply_custom_rules(item, anon, state, depth + 1) for item in obj]
+        return [_apply_custom_rules(item, anon, rules, depth + 1) for item in obj]
     if isinstance(obj, dict):
         res = {}
         for k, v in obj.items():
             new_k = k
             if isinstance(k, str):
-                for rule in state.rules.values():
+                for rule in rules:
                     if rule.enabled:
                         new_k = rule.apply(new_k, anon)
-            res[new_k] = _apply_custom_rules(v, anon, state, depth + 1)
+            res[new_k] = _apply_custom_rules(v, anon, rules, depth + 1)
         return res
     return obj
 
@@ -449,15 +456,16 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
 
     @app.put("/v1/settings")
     async def put_settings(body: dict):
-        for key in ("mode", "fail_mode", "anonymization_mode"):
-            if key in body:
-                value = str(body[key]).strip().lower()
-                if value not in (("enforce", "detect") if key == "mode"
-                                 else ("closed", "open") if key == "fail_mode"
-                                 else ("fake", "placeholders")):
-                    return JSONResponse(status_code=400, content={"detail": f"bad {key}: {value}"})
-                setattr(state, key, value)
-        state.save_state()
+        async with state_lock:
+            for key in ("mode", "fail_mode", "anonymization_mode"):
+                if key in body:
+                    value = str(body[key]).strip().lower()
+                    if value not in (("enforce", "detect") if key == "mode"
+                                     else ("closed", "open") if key == "fail_mode"
+                                     else ("fake", "placeholders")):
+                        return JSONResponse(status_code=400, content={"detail": f"bad {key}: {value}"})
+                    setattr(state, key, value)
+            await asyncio.to_thread(state.save_state)
         return state.public_settings()
 
     @app.get("/v1/rules")
@@ -466,29 +474,32 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
 
     @app.post("/v1/rules")
     async def add_rule(body: dict):
-        try:
-            rule = state.add_rule(body)
-        except ValueError as exc:
-            return JSONResponse(status_code=400, content={"detail": str(exc)})
-        state.save_state()
+        async with state_lock:
+            try:
+                rule = state.add_rule(body)
+            except ValueError as exc:
+                return JSONResponse(status_code=400, content={"detail": str(exc)})
+            await asyncio.to_thread(state.save_state)
         return rule.public()
 
     @app.patch("/v1/rules/{rule_id}")
     async def toggle_rule(rule_id: str, body: dict):
-        rule = state.rules.get(rule_id)
-        if not rule:
-            return JSONResponse(status_code=404, content={"detail": "rule not found"})
-        if "enabled" in body:
-            rule.enabled = bool(body["enabled"])
-        state.save_state()
+        async with state_lock:
+            rule = state.rules.get(rule_id)
+            if not rule:
+                return JSONResponse(status_code=404, content={"detail": "rule not found"})
+            if "enabled" in body:
+                rule.enabled = bool(body["enabled"])
+            await asyncio.to_thread(state.save_state)
         return rule.public()
 
     @app.delete("/v1/rules/{rule_id}")
     async def delete_rule(rule_id: str):
-        if rule_id not in state.rules:
-            return JSONResponse(status_code=404, content={"detail": "rule not found"})
-        del state.rules[rule_id]
-        state.save_state()
+        async with state_lock:
+            if rule_id not in state.rules:
+                return JSONResponse(status_code=404, content={"detail": "rule not found"})
+            del state.rules[rule_id]
+            await asyncio.to_thread(state.save_state)
         return {"deleted": rule_id}
 
     @app.get("/v1/audit/records")
@@ -510,7 +521,7 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         for entity in body.get("entities") or []:
             anon.register_entity(str(entity))
         text = body.get("text") or ""
-        masked = _mask_strings(text, anon)
+        masked = await asyncio.to_thread(_mask_strings, text, anon)
         injections = detect_prompt_injection(text)
         replacements = [
             {
@@ -556,6 +567,7 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
                     raise ValueError
                 entities = parsed
             except ValueError:
+                logger.warning(f"invalid entities header format in request: {entities_header_value}")
                 return JSONResponse(status_code=400, content={
                     "detail": f"{settings.entities_header} must be a JSON array of strings"})
 
@@ -564,9 +576,10 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         detect_only = state.mode == "detect"
         injections: list[str] = []
 
-        if request.method in MASKABLE_METHODS and raw_body:
+        content_type = request.headers.get("content-type", "")
+        if request.method in MASKABLE_METHODS and raw_body and (not content_type or content_type.startswith(("application/json", "text/"))):
             try:
-                payload = json.loads(raw_body)
+                payload = await asyncio.to_thread(json.loads, raw_body)
             except (json.JSONDecodeError, UnicodeDecodeError):
                 payload = None
             if payload is not None:
@@ -579,8 +592,10 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
                     anon = Anonymizer(mode=state.anonymization_mode)
                     for entity in entities:
                         anon.register_entity(entity)
-                    masked_payload = _apply_custom_rules(
-                        _mask_strings(payload, anon), anon, state)
+                    rules_snapshot = list(state.rules.values())
+                    masked_payload = await asyncio.to_thread(
+                        lambda: _apply_custom_rules(_mask_strings(payload, anon), anon, rules_snapshot)
+                    )
                     for text in _iter_strings(masked_payload):
                         if anon.leaks_in_text(text):
                             metrics.inc("compass_blocked_total")
@@ -595,8 +610,9 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
                             anon = None
                             break
                     if anon is not None and not detect_only:
-                        body_to_send = json.dumps(masked_payload, ensure_ascii=False).encode()
+                        body_to_send = (await asyncio.to_thread(json.dumps, masked_payload, ensure_ascii=False)).encode()
                 except Exception:
+                    logger.error("compass: masking error", exc_info=True)
                     metrics.inc("compass_mask_errors_total")
                     if state.fail_mode == "closed":
                         state.audit_push(request_id=request_id, path=path, blocked=True,
@@ -628,6 +644,7 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
             upstream_response = await app.state.compass_client.send(
                 upstream_request, stream=True)
         except httpx.HTTPError as exc:
+            logger.error(f"compass: upstream error: {exc}")
             metrics.inc("compass_upstream_errors_total")
             clean_err = _sanitize_error_msg(str(exc))
             return JSONResponse(status_code=502, content={"detail": f"compass: upstream error: {clean_err}"})
@@ -665,12 +682,13 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         if anon is not None and not detect_only and content:
             if "json" in content_type:
                 try:
-                    restored = _restore_strings(json.loads(content), anon)
-                    content = json.dumps(restored, ensure_ascii=False).encode()
+                    parsed_content = await asyncio.to_thread(json.loads, content)
+                    restored = await asyncio.to_thread(_restore_strings, parsed_content, anon)
+                    content = (await asyncio.to_thread(json.dumps, restored, ensure_ascii=False)).encode()
                 except (json.JSONDecodeError, UnicodeDecodeError):
-                    content = anon.de_anonymize(content.decode(errors="replace")).encode()
+                    content = (await asyncio.to_thread(anon.de_anonymize, content.decode(errors="replace"))).encode()
             else:
-                content = anon.de_anonymize(content.decode(errors="replace")).encode()
+                content = (await asyncio.to_thread(anon.de_anonymize, content.decode(errors="replace"))).encode()
 
         return Response(content=content, status_code=upstream_response.status_code,
                         headers=response_headers)

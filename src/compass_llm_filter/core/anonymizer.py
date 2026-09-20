@@ -15,6 +15,7 @@ import ipaddress
 import random
 import re
 import uuid
+from typing import TYPE_CHECKING
 
 # --- Регулярки для чувствительных фрагментов в текстах ---
 RE_LINK = re.compile(r"(?:https?://|www\.|t\.me/)[^\s,;)\]}\u00bb\"'<>]+", re.IGNORECASE)
@@ -193,6 +194,15 @@ class Anonymizer:
 
     def _record(self, real: str, fake_value: str) -> None:
         self._substitutions.append((real, fake_value))
+
+    def record_substitution(self, real: str, fake: str) -> None:
+        self._record(real, fake)
+
+    def record_stat(self, key: str, count: int = 1) -> None:
+        self.stats[key] = self.stats.get(key, 0) + count
+
+    def get_secret_mark(self, fake: str) -> str:
+        return self._secret_mark(fake)
 
     def _secret_mark(self, fake_value: str) -> str:
         """Секрет -> маркер \x00s_nonce_N\x00, фейк подставится в конце
@@ -585,18 +595,21 @@ class Anonymizer:
     # --- обратная подстановка ---
 
     def reverse_map(self) -> dict[str, str]:
-        """Фейк -> реальное. Неоднозначные фейки (два разных реальных значения
-        дали один фейк/плейсхолдер) в карту не попадают. Повтор одного
-        реального значения неоднозначностью не считается: подстановки
-        детерминированы, фейк всегда один."""
-        reals_by_fake: dict[str, set[str]] = {}
-        for real, fake_value in self._substitutions:
-            reals_by_fake.setdefault(fake_value, set()).add(real)
-        return {
-            fake_value: next(iter(reals))
-            for fake_value, reals in reals_by_fake.items()
-            if len(reals) == 1
-        }
+        """Фейк -> реальное."""
+        if self.fake:
+            reals_by_fake = {}
+            for real, fake_value in self._substitutions:
+                reals_by_fake[fake_value] = real
+            return reals_by_fake
+        else:
+            reals_by_fake = {}
+            for real, fake_value in self._substitutions:
+                reals_by_fake.setdefault(fake_value, set()).add(real)
+            return {
+                fake_value: next(iter(reals))
+                for fake_value, reals in reals_by_fake.items()
+                if len(reals) == 1
+            }
 
     def de_anonymize(self, text: str) -> str:
         """Подставить реальные значения вместо фейков. От длинных к коротким;

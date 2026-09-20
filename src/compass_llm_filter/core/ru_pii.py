@@ -114,7 +114,11 @@ RULES = [
 ]
 
 
-def apply(s: str, anon, only: tuple = (), skip: tuple = (), mark_late: bool = False) -> str:
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from compass_llm_filter.core.anonymizer import Anonymizer
+
+def apply(s: str, anon: Anonymizer, only: tuple = (), skip: tuple = (), mark_late: bool = False) -> str:
     """Прогнать текст по правилам идентификаторов.
 
     only/skip фильтруют правила по стат-ключу. IBAN идёт отдельным прогоном
@@ -132,9 +136,9 @@ def apply(s: str, anon, only: tuple = (), skip: tuple = (), mark_late: bool = Fa
                 original = m.group(2)
                 candidate = _x(original)
                 fake_value = _f(original, candidate) if anon.fake else _p
-                anon._record(original, fake_value)
-                anon.stats["passports"] = anon.stats.get("passports", 0) + 1
-                out = anon._secret_mark(fake_value) if mark_late else fake_value
+                anon.record_substitution(original, fake_value)
+                anon.record_stat("passports")
+                out = anon.get_secret_mark(fake_value) if mark_late else fake_value
                 return prefix + out
 
             original = m.group(0)
@@ -142,8 +146,8 @@ def apply(s: str, anon, only: tuple = (), skip: tuple = (), mark_late: bool = Fa
             if not _v(candidate):
                 return original  # сумма не сошлась — не наш идентификатор
             fake_value = _f(original, candidate) if anon.fake else _p
-            anon._record(original, fake_value)
-            anon.stats[_k] = anon.stats.get(_k, 0) + 1
-            return anon._secret_mark(fake_value) if mark_late else fake_value
+            anon.record_substitution(original, fake_value)
+            anon.record_stat(_k)
+            return anon.get_secret_mark(fake_value) if mark_late else fake_value
         s = regex.sub(repl, s)
     return s

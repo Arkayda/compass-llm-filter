@@ -32,7 +32,7 @@ class CustomRule:
     def __post_init__(self) -> None:
         self._regex = re.compile(self.pattern)
 
-    def apply(self, s: str, anon) -> str:
+    def apply(self, s: str, anon: "compass_llm_filter.core.anonymizer.Anonymizer") -> str:
         def repl(m: re.Match) -> str:
             real = m.group(0)
             if self.replacement == "fake":
@@ -46,8 +46,8 @@ class CustomRule:
                 fake = prefix + _junk(rng, len(real) - len(prefix))
             else:
                 fake = self.placeholder
-            anon._record(real, fake)
-            anon.stats["custom"] = anon.stats.get("custom", 0) + 1
+            anon.record_substitution(real, fake)
+            anon.record_stat("custom")
             return fake
         return self._regex.sub(repl, s)
 
