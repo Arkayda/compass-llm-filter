@@ -692,3 +692,29 @@ async def test_anthropic_tool_use_name_and_args_survive():
     assert args == '{"query":"посмотрите search.corp.ru и ещё"}'  # восстановлено
     assert '"type":"content_block_stop"' in body
     assert '"type":"message_stop"' in body
+
+def test_sse_flush_keeps_event_enums():
+    # сброс хвоста на границе блока: синтетическое событие обязано сохранить
+    # enum-поля (type) непустыми и добавить event-строку — иначе парсер
+    # tool-call на клиенте ронял весь ход, и ответ агента пропадал
+    from compass_llm_filter.proxy.app import SSERestorer
+    anon = Anonymizer()
+    masked = anon.sanitize_string("запрос search.corp.ru")[len("запрос "):]
+    assert masked != "search.corp.ru"  # фейк-домен с тем же первым лейблом
+    r = SSERestorer(anon)
+    out = b""
+    ev = {"type": "content_block_delta", "index": 0,
+          "delta": {"type": "input_json_delta", "partial_json": "запрос "}}
+    out += r.feed_bytes(("event: content_block_delta\ndata: "
+                         + json.dumps(ev, ensure_ascii=False) + "\n\n").encode())
+    # обрываем поток ровно на префиксе фейка и закрываем блок
+    out += r.feed_bytes(('data: {"type":"content_block_delta","index":0,"delta":'
+                         '{"type":"input_json_delta","partial_json":"search"}}\n\n').encode())
+    out += r.feed_bytes(('data: {"type":"content_block_stop","index":0}\n\n').encode())
+    text = out.decode()
+    assert '"type":"content_block_delta"' in text      # enum не обнулён
+    assert '"input_json_delta"' in text                # delta.type не обнулён
+    assert '"type":"content_block_stop"' in text
+    synth = [l for l in text.split("\n") if l.startswith("event:")]
+    assert synth and synth[-1] == "event: content_block_delta"  # event-строка есть
+    assert "search" in text                             # хвост не потерян

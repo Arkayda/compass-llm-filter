@@ -212,8 +212,11 @@ class SSERestorer:
         return obj
 
     def _flush_events(self) -> list[str]:
-        """Синтетические события для хвостов, не закрывшихся до конца потока:
-        клон последнего события поля, прочие строковые поля обнулены."""
+        """Синтетические события для хвостов, не закрывшихся до конца потока
+        (или до границы блока): клон последнего события поля с хвостом в
+        целевом поле. Прочие поля клона сохраняются: enum-дискриминаторы
+        (type, role) обязаны доезжать непустыми — обнуление ломало парсер
+        tool-call событий на стороне клиента, повтор enum-значения безвреден."""
         events = []
         for key, slot in list(self.fields.items()):
             if not slot.pending:
@@ -224,12 +227,6 @@ class SSERestorer:
                 events.append("data: " + flushed + "\n\n")
                 continue
             clone = copy.deepcopy(slot.last_obj)
-            for other_key, other in self.fields.items():
-                if other is not slot and other.last_obj is slot.last_obj:
-                    try:
-                        _set_path(clone, other.path, "")
-                    except (KeyError, IndexError, TypeError, ValueError):
-                        pass
             try:
                 _set_path(clone, slot.path, flushed)
             except (KeyError, IndexError, TypeError, ValueError):
