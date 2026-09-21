@@ -228,3 +228,29 @@ def test_ipv6_masked_and_restored():
     restored = anon.de_anonymize(cleaned)
     assert "2001:0db8:85a3:0000:0000:8a2e:0370:7334" in restored
     assert "fe80::1ff:fe23:4567:890a" in restored
+
+
+def test_leak_check_ignores_guarded_path_context():
+    # "crontab.cron" в тексте маскируется как домен, но такой же кандидат
+    # внутри пути файла ("sh/cron/crontab.cron") доменный детектор
+    # сознательно не трогает (lookbehind на "/"). Это не утечка: старая
+    # проверка подстрокой считала её ошибкой, и enforce блокировал запрос
+    # агента целиком (503 на ровном месте).
+    anon = Anonymizer(mode="fake")
+    text = (
+        "Откройте файл crontab.cron, в нём расписание; полное содержимое: "
+        "cat \"${SCRIPT_PATH}/sh/cron/crontab.cron\" | grep hourly"
+    )
+    cleaned = anon.sanitize_string(text)
+    assert "crontab.cron" not in cleaned.split("cat")[0]  # в тексте заменён
+    assert "sh/cron/crontab.cron" in cleaned               # в пути сохранён
+    assert anon.leaks_in_text(cleaned) == 0
+
+
+def test_leak_check_catches_real_leftover():
+    # настоящая утечка — оригинал в маскируемом контексте — по-прежнему ловится
+    anon = Anonymizer(mode="fake")
+    cleaned = anon.sanitize_string("напишите на ivan.ivanov@romashka.ru")
+    assert "ivan.ivanov@romashka.ru" not in cleaned
+    assert anon.leaks_in_text(cleaned + " и продублируйте на ivan.ivanov@romashka.ru") >= 1
+    assert anon.leaks_in_text(cleaned) == 0

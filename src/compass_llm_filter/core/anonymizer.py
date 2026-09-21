@@ -337,8 +337,12 @@ class Anonymizer:
     def leaks_in_text(self, s: str) -> int:
         """Сколько реальных значений осталось в тексте после чистки (0 — чисто).
         Проверяются имена из карты, и все подстановки (телефоны/почты/домены/
-        IP). Сначала из текста вырезаются вставленные фейки — иначе фейк,
-        содержащий реальный фрагмент, даёт ложную тревогу."""
+        IP). Утечка — оригинал, который детектор замаскировал бы и в этом
+        контексте: повторный проход его снова находит. Встреча оригинала там,
+        где детектор сознательно не трогает текст (например, имя файла в пути
+        "sh/cron/crontab.cron" для доменного детектора), — не утечка: старая
+        проверка подстрокой считала её ошибкой и в enforce блокировала запрос
+        целиком."""
         if self._phases is None:
             self.prepare()
         count = 0
@@ -347,19 +351,11 @@ class Anonymizer:
         if self._leak_lat_re is not None and self._leak_lat_re.search(s):
             count += 1
         if self._substitutions:
-            masked = s
-            for fake_value in sorted({f for _, f in self._substitutions}, key=len, reverse=True):
-                masked = masked.replace(fake_value, "\x00")
-            word_like = re.compile(r"^[\wА-Яа-яЁё@.\-]+$", re.UNICODE)
-            for real, _fake in self._substitutions:
-                if len(real) < 4:
-                    continue  # короткие осколки дают ложные срабатывания
-                if word_like.match(real):
-                    hit = re.search(rf"(?<![\w]){re.escape(real)}(?![\w])", masked)
-                else:
-                    hit = real in masked
-                if hit:
-                    count += 1
+            reals = {r for r, _ in self._substitutions if len(r) >= 4}
+            if reals:
+                probe = Anonymizer(mode="fake" if self.fake else "placeholders")
+                probe.sanitize_string(s)
+                count += len({c for c, _f in probe._substitutions if c in reals})
         return count
 
     # --- очистка строк ---

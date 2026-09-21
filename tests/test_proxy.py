@@ -718,3 +718,56 @@ def test_sse_flush_keeps_event_enums():
     synth = [l for l in text.split("\n") if l.startswith("event:")]
     assert synth and synth[-1] == "event: content_block_delta"  # event-строка есть
     assert "search" in text                             # хвост не потерян
+
+
+def test_sse_enums_and_signature_never_held():
+    # stop_reason и signature лежат под "delta", но это не текстовые потоки:
+    # их суффиксы ("e" у tool_use — как example-фейки, цифры base64 — как
+    # фейк-IP) раньше прижимались hold-логикой, значение обрезалось, а
+    # синтетический flush порождал событие с мусорным stop_reason:"e" —
+    # claude-code на таком потоке ломал разбор tool-call.
+    from compass_llm_filter.proxy.app import SSERestorer
+    anon = Anonymizer()
+    anon.sanitize_string("сервер 185.42.17.203")            # есть фейк-IP
+    anon._record("контакт е", "e7f3ab99.example.com")       # фейк на "e..."
+    anon._record("девятка", "9.830.524.35")                 # фейк на "9..."
+    r = SSERestorer(anon)
+    out = b""
+    for line in [
+        'data: {"type":"content_block_delta","index":0,"delta":'
+        '{"type":"signature_delta","signature":"ErUBCkYIBxgBIkQoSBkKq9"}}',
+        'data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null}}',
+        'data: [DONE]',
+    ]:
+        out += r.feed_bytes((line + "\n\n").encode())
+    text = out.decode()
+    assert '"stop_reason":"tool_use"' in text      # enum целиком
+    assert "tool_us\"," not in text                # обрезки не было
+    assert "ErUBCkYIBxgBIkQoSBkKq9" in text        # подпись целиком
+    # синтетики нет: хвосты не-текстовых полей не придерживаются и не сбрасываются
+    assert text.count('"type":"message_delta"') == 1
+    assert not [l for l in text.split("\n") if l.startswith("event: message_delta")]
+
+
+def test_sse_tool_args_digit_tail_released_once():
+    # фейк-телефон вида "8 248 ..." заставляет hold придержать и цифру "8"
+    # аргументов tool-call; финальная "}" обязана освободить хвост ровно один
+    # раз — дублирование хвоста синтетикой давало "top_k":8}8} и tool-call,
+    # который клиент не мог распарсить
+    from compass_llm_filter.proxy.app import SSERestorer
+    anon = Anonymizer()
+    anon.sanitize_string("почта user@corp.ru")
+    anon._record("8 999 123-45-67", "8 248 210-79-55")      # фейк тоже с "8"
+    r = SSERestorer(anon)
+    deltas = ['{"', 'query', '":"', 'отчёт', ' по расписанию', '","', 'top', '_k', '":', '8', '}']
+    out = b""
+    for d in deltas:
+        ev = {"type": "content_block_delta", "index": 1,
+              "delta": {"type": "input_json_delta", "partial_json": d}}
+        out += r.feed_bytes(("event: content_block_delta\ndata: "
+                             + json.dumps(ev, ensure_ascii=False) + "\n\n").encode())
+    out += r.feed_bytes(('data: {"type":"content_block_stop","index":1}\n\n').encode())
+    out += r.feed_bytes(b"data: [DONE]\n\n")
+    args = "".join(re.findall(r'"partial_json":"((?:[^"\\]|\\.)*)"', out.decode()))
+    args = json.loads(f'"{args}"')
+    assert json.loads(args) == {"query": "отчёт по расписанию", "top_k": 8}

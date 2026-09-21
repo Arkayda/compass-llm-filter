@@ -135,6 +135,23 @@ def _set_path(obj, path: tuple, value) -> None:
         cur[last] = value
 
 
+# Листья JSON-путей, по которым модель стримит произвольный текст: anthropic
+# content_block_delta (text/partial_json/thinking) и openai choices[].delta
+# (content, reasoning_content, tool_calls[].function.arguments). Только в этих
+# полях могут оказаться фейки — только они копятся между событиями с hold-логикой.
+# Остальные поля под "delta" — атомарные перечисления и служебные блобы
+# (delta.type, delta.stop_reason, delta.role, delta.signature): их суффикс
+# случайно совпадает с префиксом фейка ("tool_use" -> "e" от example.com,
+# base64-подпись -> цифра от фейк-IP), hold обрезал бы значение навсегда, а
+# синтетический flush плодил событие с мусорным stop_reason/signature —
+# claude-code на таком потоке ломал разбор tool-call.
+STREAM_LEAVES = frozenset({
+    "text", "partial_json", "thinking",              # anthropic
+    "content", "reasoning_content", "arguments",     # openai
+    "delta",                                          # legacy: {"delta": "токен"}
+})
+
+
 class SSERestorer:
     """Восстановление оригиналов в SSE-потоке токен-за-токеном.
 
@@ -221,6 +238,9 @@ class SSERestorer:
         for key, slot in list(self.fields.items()):
             if not slot.pending:
                 continue
+            if key.rsplit(".", 1)[-1] not in STREAM_LEAVES:
+                slot.pending = ""  # не текстовый поток — хвосту тут не место
+                continue
             flushed = self.anon.de_anonymize(slot.pending)
             slot.pending = ""
             if slot.last_obj is None:  # поле вне JSON не встречалось
@@ -244,12 +264,12 @@ class SSERestorer:
         slot = self.fields.setdefault(key, _StreamSlot())
         buf = slot.pending + delta
         out = self.anon.de_anonymize(buf)
-        # между событиями копятся только поля-дельты (текст, аргументы
-        # tool-call); атомарные поля — имя инструмента, id, перечисления —
+        # между событиями копятся только текстовые потоки (токены ответа,
+        # аргументы tool-call); атомарные поля — перечисления, id, подписи —
         # приходят целиком одним событием, продолжения не будет: придержанный
-        # суффикс здесь навсегда потерялся бы (обрезанное имя инструмента
-        # ломало tool-call), поэтому отдаём сразу
-        if "delta" not in key:
+        # суффикс здесь навсегда потерялся бы (обрезанное stop_reason
+        # ломало парсер tool-call), поэтому отдаём сразу
+        if key.rsplit(".", 1)[-1] not in STREAM_LEAVES:
             slot.pending = ""
             return out
         # придержать суффикс, который может дорасти до фейка; всё,
