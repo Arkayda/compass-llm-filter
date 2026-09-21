@@ -390,7 +390,54 @@ async def test_sse_passthrough_lines_and_done():
         body = resp.text
     assert "event: message" in body and ": keep-alive" in body
     assert body.count("data: [DONE]") == 1
-    assert "Ива!" in body  # контент без PII проходит без изменений
+    # контент без PII уходит сразу, не дожидаясь граничного символа
+    assert '"content":"Ива"' in body and '"content":"!"' in body
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_sse_masked_and_restored():
+    # протокол агента (/v1/messages, event:+data:): значения-перечисления
+    # должны уходить сразу, а фейк в text_delta — восстанавливаться
+    seen = []
+
+    def upstream(request):
+        seen.append(json.loads(request.content))
+        user_text = json.loads(request.content)["messages"][0]["content"]
+        pieces = [user_text[i:i + 7] for i in range(0, len(user_text), 7)]
+        lines = [
+            "event: message_start",
+            'data: {"type":"message_start","message":{"id":"msg_1","role":"assistant"}}',
+            "",
+            "event: content_block_start",
+            'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            "",
+        ]
+        for p in pieces:
+            lines += [
+                "event: content_block_delta",
+                "data: " + json.dumps({"type": "content_block_delta", "index": 0,
+                                       "delta": {"type": "text_delta", "text": p}},
+                                      ensure_ascii=False),
+                "",
+            ]
+        lines += ["event: message_stop", 'data: {"type":"message_stop"}', ""]
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                              content="\n".join(lines).encode())
+
+    app = create_app(make_settings(), upstream_transport=MockTransport(upstream))
+    async with AsyncClient(transport=ASGITransport(app=app),
+                           base_url="http://t") as client:
+        resp = await client.post("/api/anthropic/v1/messages", json={
+            "model": "glm-4.7", "max_tokens": 1024,
+            "messages": [{"role": "user", "content": f"Перезвоните {PHONE}"}]})
+    body = resp.text
+
+    assert PHONE not in json.dumps(seen[0], ensure_ascii=False)  # провайдер видел фейк
+    assert PHONE in body  # клиент получил оригинал, склеенный из дельт
+    # события протокола доезжают живьём, а не обнулёнными клонами в конце
+    assert '"type":"message_start"' in body
+    assert '"type":"content_block_delta"' in body
+    assert '"type":"message_stop"' in body
 
 
 def test_sse_restorer_holds_fake_prefix():

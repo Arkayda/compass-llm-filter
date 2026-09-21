@@ -67,9 +67,6 @@ DETECTORS = [
 ]
 
 # словарный символ — тот же класс, по которому de_anonymize строит границы слов
-_WORDCH = re.compile(r"[\wА-Яа-яЁё@.\-]")
-
-
 def _sanitize_error_msg(msg: str) -> str:
     """Очищает учетные данные и токены из сообщений об ошибках."""
     s = re.sub(r"://([^:@/]+):([^@/]+)@", r"://\1:***@", msg)
@@ -239,15 +236,10 @@ class SSERestorer:
     def _feed_field(self, key: str, delta: str) -> str:
         slot = self.fields.setdefault(key, _StreamSlot())
         buf = slot.pending + delta
-        # обрабатываем только до последнего граничного символа: за концом
-        # буфера может прийти буква, и слова ещё нет
-        cut = 0
-        for i in range(len(buf) - 1, -1, -1):
-            if not _WORDCH.match(buf[i]):
-                cut = i + 1
-                break
-        out = self.anon.de_anonymize(buf[:cut]) if cut else ""
-        # придержать строгий префикс фейка
+        out = self.anon.de_anonymize(buf)
+        # придержать суффикс, который может дорасти до фейка; всё,
+        # что фейком стать не может (в т.ч. значения-перечисления
+        # вида "message_start"), уходит сразу
         hold = ""
         if self.fakes and out:
             for length in range(min(len(out), self.maxfake - 1), 0, -1):
@@ -255,7 +247,7 @@ class SSERestorer:
                 if any(f != suffix and f.startswith(suffix) for f in self.fakes):
                     hold = suffix
                     break
-        slot.pending = hold + buf[cut:]
+        slot.pending = hold
         return out[:len(out) - len(hold)] if hold else out
 
 
