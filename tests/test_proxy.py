@@ -2,6 +2,7 @@
 fail-closed, entities-заголовок, правила, аудит, метрики. Апстрим — мок."""
 import base64
 import json
+import re
 import os
 import pathlib
 
@@ -623,3 +624,71 @@ async def test_sandbox_returns_replacements_and_injections():
         assert any(r["original"] == "+7 912 345-67-89" for r in repls)
 
 
+
+async def test_anthropic_tool_use_name_and_args_survive():
+    # имя инструмента — атомарное поле: суффикс, совпадающий с префиксом фейка
+    # (search...), раньше прижимался навсегда и обрезал tool-call; аргументы —
+    # поле-дельта, разрезанное по опасной границе, восстанавливаются склейкой,
+    # прижатый хвост сбрасывается на content_block_stop
+    seen = []
+
+    def upstream(request):
+        seen.append(json.loads(request.content))
+        user_text = json.loads(request.content)["messages"][0]["content"]
+        # masked text: "посмотрите search.<hash>.example.com" (фейк домена)
+        lines = [
+            "event: message_start",
+            'data: {"type":"message_start","message":{"id":"msg_2","role":"assistant"}}',
+            "",
+            "event: content_block_start",
+            'data: {"type":"content_block_start","index":0,"content_block":'
+            '{"type":"tool_use","id":"toolu_1","name":"mcp__pumba-search__search","input":{}}}',
+            "",
+            "event: content_block_delta",
+            'data: {"type":"content_block_delta","index":0,"delta":'
+            '{"type":"input_json_delta","partial_json":"{\\"query\\":\\""}',
+            "",
+        ]
+        # аргументы рвём ровно посередине фейка: первая часть кончается префиксом
+        first, second = user_text[:len(user_text) // 2], user_text[len(user_text) // 2:]
+        for p in (first, second):
+            lines += [
+                "event: content_block_delta",
+                "data: " + json.dumps({"type": "content_block_delta", "index": 0,
+                                       "delta": {"type": "input_json_delta",
+                                                 "partial_json": p}},
+                                      ensure_ascii=False),
+                "",
+            ]
+        lines += [
+            "event: content_block_delta",
+            'data: {"type":"content_block_delta","index":0,"delta":'
+            '{"type":"input_json_delta","partial_json":" и ещё\\"}"}}',
+            "",
+            "event: content_block_stop",
+            'data: {"type":"content_block_stop","index":0}',
+            "",
+            "event: message_stop",
+            'data: {"type":"message_stop"}',
+            "",
+        ]
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                              content="\n".join(lines).encode())
+
+    app = create_app(make_settings(mode="enforce"), upstream_transport=MockTransport(upstream))
+    async with AsyncClient(transport=ASGITransport(app=app),
+                           base_url="http://t") as client:
+        resp = await client.post("/api/anthropic/v1/messages", json={
+            "model": "glm-4.7", "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "посмотрите search.corp.ru"}]})
+    body = resp.text
+
+    masked_seen = json.dumps(seen[0], ensure_ascii=False)
+    assert "search.corp.ru" not in masked_seen          # провайдер видел фейк
+    assert masked_seen.count("example.com") >= 1
+    assert '"name":"mcp__pumba-search__search"' in body  # имя инструмента целиком
+    args = "".join(re.findall(r'"partial_json":"((?:[^"\\]|\\.)*)"', body))
+    args = json.loads(f'"{args}"') if args else ""
+    assert args == '{"query":"посмотрите search.corp.ru и ещё"}'  # восстановлено
+    assert '"type":"content_block_stop"' in body
+    assert '"type":"message_stop"' in body

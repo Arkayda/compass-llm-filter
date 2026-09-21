@@ -187,11 +187,16 @@ class SSERestorer:
             obj = json.loads(payload)
         except ValueError:
             return "data: " + self._feed_field("_raw", payload)
+        # конец блока/сообщения: продолжения дельты не будет — прижатые
+        # хвосты выпускаем синтетическими событиями до строки-терминатора
+        boundary = isinstance(obj, dict) and obj.get("type") in (
+            "content_block_stop", "message_stop")
+        prefix = "".join(self._flush_events()) if boundary else ""
         touched = set()
         obj = self._walk(obj, (), touched)
         for key in touched:
             self.fields[key].last_obj = obj
-        return "data: " + json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+        return prefix + "data: " + json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
     def _walk(self, obj, path, touched):
         if isinstance(obj, str):
@@ -229,17 +234,29 @@ class SSERestorer:
                 _set_path(clone, slot.path, flushed)
             except (KeyError, IndexError, TypeError, ValueError):
                 continue
+            # антропные события парсятся по event-строке — добавляем её,
+            # имя события по протоколу совпадает с полем type в data
+            head = ""
+            if isinstance(clone.get("type"), str):
+                head = "event: " + clone["type"] + "\n"
             events.append(
-                "data: " + json.dumps(clone, ensure_ascii=False, separators=(",", ":")) + "\n\n")
+                head + "data: " + json.dumps(clone, ensure_ascii=False, separators=(",", ":")) + "\n\n")
         return events
 
     def _feed_field(self, key: str, delta: str) -> str:
         slot = self.fields.setdefault(key, _StreamSlot())
         buf = slot.pending + delta
         out = self.anon.de_anonymize(buf)
+        # между событиями копятся только поля-дельты (текст, аргументы
+        # tool-call); атомарные поля — имя инструмента, id, перечисления —
+        # приходят целиком одним событием, продолжения не будет: придержанный
+        # суффикс здесь навсегда потерялся бы (обрезанное имя инструмента
+        # ломало tool-call), поэтому отдаём сразу
+        if "delta" not in key:
+            slot.pending = ""
+            return out
         # придержать суффикс, который может дорасти до фейка; всё,
-        # что фейком стать не может (в т.ч. значения-перечисления
-        # вида "message_start"), уходит сразу
+        # что фейком стать не может, уходит сразу
         hold = ""
         if self.fakes and out:
             for length in range(min(len(out), self.maxfake - 1), 0, -1):
