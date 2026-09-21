@@ -93,6 +93,10 @@ def _categorize_entity(orig: str, fake: str) -> str:
         return "passport"
     if re.search(r"\b\d{3}-\d{3}-\d{3}\s*\d{2}\b", s):
         return "snils"
+    # IP (v4/v6) обязан идти раньше inn: четыре октета дают 10-12 цифр и без
+    # этого адрес классифицировался как ИНН
+    if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", s) or ":" in s and re.match(r"^[0-9a-fA-F:]+$", s):
+        return "ip"
     digits = re.sub(r"\D", "", s)
     if len(digits) in (10, 12) and ("ИНН" in s or not s.startswith(("+", "8"))):
         return "inn"
@@ -104,8 +108,6 @@ def _categorize_entity(orig: str, fake: str) -> str:
         return "phone"
     if len(digits) in (16, 18, 19) and re.match(r"^[\d\s\-]+$", s):
         return "card"
-    if re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", s) or ":" in s and re.match(r"^[0-9a-fA-F:]+$", s):
-        return "ip"
     if "." in s and not re.search(r"\s", s):
         return "domain"
     return "names"
@@ -536,7 +538,10 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         for entity in body.get("entities") or []:
             anon.register_entity(str(entity))
         text = body.get("text") or ""
-        masked = _mask_strings(text, anon)
+        # тот же конвейер, что у прокси-пути: сперва встроенные детекторы, затем
+        # кастомные правила — иначе песочница (и построенное на ней превью в
+        # хелпеске) соврала бы, покажет меньше, чем уйдёт провайдеру
+        masked = _apply_custom_rules(_mask_strings(text, anon), anon, state)
         injections = detect_prompt_injection(text)
         replacements = [
             {
