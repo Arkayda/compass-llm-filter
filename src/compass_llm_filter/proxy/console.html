@@ -143,6 +143,9 @@
   .pill.bad { background: var(--bad-bg); color: var(--bad-tx); border: 1px solid var(--bad-border); }
   .pill.warn { background: var(--warn-bg); color: var(--warn-tx); border: 1px solid var(--warn-border); }
   .pill.muted { background: var(--gray50); color: var(--gray600); border: 1px solid var(--border); }
+  /* несколько пилюль в одной ячейке: переносим, иначе длинная строка инъекций
+     распирает колонку и уводит таблицу за край панели */
+  .tags { display: flex; flex-wrap: wrap; gap: 4px; max-width: 280px; }
   .badges { display: flex; flex-wrap: wrap; gap: 8px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th { text-align: left; background: var(--gray50); color: var(--muted); font-weight: 600;
@@ -778,7 +781,7 @@ async function loadAudit() {
     <td class="mono">${r.detected ? Object.entries(r.detected).map(([k, v]) => k + ':' + v).join(' ') : '—'}</td>
     <td class="mono">${r.entities ?? '—'}</td>
     <td>${r.injections && r.injections.length
-      ? `<span class="pill bad">${esc(r.injections.join(','))}</span>`
+      ? `<span class="tags">${r.injections.map(t => `<span class="pill bad">${esc(t)}</span>`).join('')}</span>`
       : '<span class="pill muted">—</span>'}</td>
     <td>${r.blocked
       ? `<span class="pill bad">заблокирован</span>${r.reason ? '<div class="hint" style="margin:4px 0 0">' + esc(r.reason) + '</div>' : ''}`
