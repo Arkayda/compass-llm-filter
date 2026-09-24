@@ -27,6 +27,7 @@ class Settings:
     auth_password: str = ""
     secret_pepper: str = ""          # серверная соль ГПСЧ для защиты от rainbow-table подбора
     strict_auth: bool = False        # требовать обязательную настройку basic-auth при старте
+    allow_private_upstream: bool = False  # разрешить внутренние IP апстрима (локальный мок/dev)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -48,6 +49,8 @@ class Settings:
             auth_password=env.get("COMPASS_AUTH_PASSWORD", ""),
             secret_pepper=env.get("COMPASS_SECRET_PEPPER", ""),
             strict_auth=env.get("COMPASS_STRICT_AUTH", "false").lower() in ("true", "1", "yes"),
+            allow_private_upstream=env.get("COMPASS_ALLOW_PRIVATE_UPSTREAM", "false").lower()
+            in ("true", "1", "yes"),
         )
         if s.mode not in ("enforce", "detect"):
             raise ValueError(f"COMPASS_MODE must be enforce|detect, got {s.mode!r}")

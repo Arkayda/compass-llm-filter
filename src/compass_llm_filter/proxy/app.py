@@ -14,6 +14,7 @@ import base64
 import codecs
 import copy
 import hmac
+import ipaddress
 import json
 import pathlib
 import re
@@ -69,9 +70,13 @@ DETECTORS = [
 # словарный символ — тот же класс, по которому de_anonymize строит границы слов
 def _sanitize_error_msg(msg: str) -> str:
     """Очищает учетные данные и токены из сообщений об ошибках."""
-    s = re.sub(r"://([^:@/]+):([^@/]+)@", r"://\1:***@", msg)
+    s = re.sub(r"://([^:@/\s]+):([^@/\s]+)@", r"://\1:***@", msg)
     s = re.sub(r"(?i)bearer\s+[A-Za-z0-9_\-\.]{15,}", "Bearer ***", s)
-    s = re.sub(r"(?i)(?:api_key|apikey|token|password|secret)=([^&\s]+)", r"\g<0>=***", s)
+    # метку сохраняем, значение вырезаем целиком (раньше \g<0> возвращал его обратно)
+    s = re.sub(
+        r"(?i)\b((?:api[-_]?key|apikey|access[-_]?token|key|token|secret|password|passwd|pwd)"
+        r"\s*[=:])[^&\s'\"]+",
+        r"\1***", s)
     return s
 
 
@@ -198,7 +203,11 @@ class SSERestorer:
     def _feed_line(self, line: str) -> str:
         if not line.startswith("data:") or not line[5:].strip():
             return line  # комментарии, event:/id:, пустые data:
-        payload = line[5:].strip()
+        # по спецификации SSE у значения data убирается РОВНО ОДИН ведущий
+        # пробел; .strip() искажал payload с значимыми пробелами
+        payload = line[5:]
+        if payload.startswith(" "):
+            payload = payload[1:]
         if payload == "[DONE]":
             # перед DONE — сброс придержнутых хвостов
             return "".join(self._flush_events()) + line
@@ -290,6 +299,19 @@ class SSERestorer:
 MAX_RECURSION_DEPTH = 30
 
 
+def _unique_key(res: dict, key) -> str:
+    """Маскированные ключи двух разных оригиналов могут совпасть (например,
+    обе карты -> [CARD]); молчаливая перезапись теряла бы значение — суффиксуем."""
+    if key not in res:
+        return key
+    base = key
+    n = 2
+    while key in res:
+        key = f"{base}#{n}"
+        n += 1
+    return key
+
+
 def _mask_strings(obj, anon: Anonymizer, depth: int = 0):
     """PII во всех строках JSON (в значениях и строковых ключах, с защитой от глубины рекурсии)."""
     if depth > MAX_RECURSION_DEPTH:
@@ -299,10 +321,11 @@ def _mask_strings(obj, anon: Anonymizer, depth: int = 0):
     if isinstance(obj, list):
         return [_mask_strings(item, anon, depth + 1) for item in obj]
     if isinstance(obj, dict):
-        return {
-            anon.sanitize_string(k) if isinstance(k, str) else k: _mask_strings(v, anon, depth + 1)
-            for k, v in obj.items()
-        }
+        res = {}
+        for k, v in obj.items():
+            new_k = anon.sanitize_string(k) if isinstance(k, str) else k
+            res[_unique_key(res, new_k)] = _mask_strings(v, anon, depth + 1)
+        return res
     return obj
 
 
@@ -340,9 +363,27 @@ def _apply_custom_rules(obj, anon: Anonymizer, state, depth: int = 0):
                 for rule in state.rules.values():
                     if rule.enabled:
                         new_k = rule.apply(new_k, anon)
-            res[new_k] = _apply_custom_rules(v, anon, state, depth + 1)
+            res[_unique_key(res, new_k)] = _apply_custom_rules(v, anon, state, depth + 1)
         return res
     return obj
+
+
+def _validate_upstream_host(url: str, allow_private: bool) -> None:
+    """SSRF-защита: апстрим не должен указывать на внутренние адреса,
+    если это явно не разрешено (локальный мок/dev). Проверяются IP-литералы
+    и localhost; доменные имена не резолвим (DNS-ответ мог бы смениться
+    между проверкой и запросом)."""
+    if allow_private:
+        return
+    host = urllib.parse.urlsplit(url).hostname or ""
+    if host.lower() == "localhost":
+        raise ValueError(f"upstream host {host!r} is internal; set COMPASS_ALLOW_PRIVATE_UPSTREAM=true only for local dev")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return  # доменное имя
+    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified:
+        raise ValueError(f"upstream host {host!r} is an internal IP; set COMPASS_ALLOW_PRIVATE_UPSTREAM=true only for local dev")
 
 
 def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
@@ -351,6 +392,7 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
 
     if not settings.upstream_base_url.startswith(("http://", "https://")):
         raise ValueError(f"Invalid upstream_base_url scheme: {settings.upstream_base_url}")
+    _validate_upstream_host(settings.upstream_base_url, settings.allow_private_upstream)
 
     if settings.secret_pepper:
         set_default_pepper(settings.secret_pepper)
@@ -366,21 +408,6 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         transport=upstream_transport,
         follow_redirects=False,
     )
-
-    # HTTP Security Headers на все ответы
-    @app.middleware("http")
-    async def _security_headers(request: Request, call_next):
-        response = await call_next(request)
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; "
-            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-            "connect-src 'self'"
-        )
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Permissions-Policy"] = "geolocation=(), camera=(), microphone=()"
-        return response
 
     # CSRF-защита для управляющих мутирующих эндпоинтов (/v1/settings, /v1/rules)
     @app.middleware("http")
@@ -407,13 +434,21 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         return await call_next(request)
 
     # basic-auth консоли и управляющего API; проксируемый LLM-трафик не трогаем.
+    # Защищаются ТОЛЬКО конкретные управляющие пути: /v1/* — это заодно и
+    # стандартные пути LLM API (/v1/chat/completions, /v1/models), их закрыть —
+    # сломать всех OpenAI-совместимых клиентов.
     # /healthz с loopback открыт без пароля — по нему ходит Docker healthcheck
     if settings.auth_user and settings.auth_password:
         @app.middleware("http")
         async def _console_auth(request: Request, call_next):
             path = request.url.path
-            if (path in ("/console", "/logo.svg", "/metrics", "/healthz")
-                    or path.startswith("/v1/")):
+            admin = (
+                path in ("/console", "/logo.svg", "/metrics", "/healthz",
+                         "/v1/settings", "/v1/rules", "/v1/audit/records",
+                         "/v1/detectors", "/v1/sandbox")
+                or path.startswith("/v1/rules/")
+            )
+            if admin:
                 if path == "/healthz" and request.client and request.client.host in ("127.0.0.1", "::1"):
                     return await call_next(request)
                 header = request.headers.get("authorization", "")
@@ -432,6 +467,22 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
                         headers={"WWW-Authenticate": 'Basic realm="compass"'},
                     )
             return await call_next(request)
+
+    # HTTP Security Headers на ВСЕ ответы (включая 401/403 от мидлварей выше):
+    # регистрируется последним => выполняется внешним, заголовки попадают и в ошибки
+    @app.middleware("http")
+    async def _security_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+            "connect-src 'self'"
+        )
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "geolocation=(), camera=(), microphone=()"
+        return response
 
     # --- служебные эндпоинты ---
 
@@ -565,6 +616,11 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
     @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
     async def proxy(request: Request, path: str):
         request_id = uuid.uuid4().hex
+        # грубый отсев по Content-Length до чтения тела (анти-DoS);
+        # chunked-тела дочитываются и проверяются по факту ниже
+        content_length = request.headers.get("content-length", "")
+        if content_length.isdigit() and int(content_length) > settings.max_body_bytes:
+            return JSONResponse(status_code=413, content={"detail": "body too large"})
         raw_body = await request.body()
 
         if len(raw_body) > settings.max_body_bytes:
@@ -669,19 +725,27 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         }
         content_type = upstream_response.headers.get("content-type", "")
 
-        # SSE: восстановление токен-за-токеном, кадры уходят по мере прихода
-        if anon is not None and not detect_only and "event-stream" in content_type:
-            restorer = SSERestorer(anon)
+        # SSE: восстановление токен-за-токеном, кадры уходят по мере прихода.
+        # В detect-режиме (shadow) и после fail-open апстрим видит оригинал —
+        # восстанавливать нечего, но стримить всё равно нужно: буферизация до
+        # конца ответа ломала бы TTFT и длинные потоки
+        if "event-stream" in content_type:
+            restore = anon is not None and not detect_only
+            restorer = SSERestorer(anon) if restore else None
 
             async def sse_gen():
                 try:
-                    async for chunk in upstream_response.aiter_bytes():
-                        piece = restorer.feed_bytes(chunk)
+                    if restore:
+                        async for chunk in upstream_response.aiter_bytes():
+                            piece = restorer.feed_bytes(chunk)
+                            if piece:
+                                yield piece
+                        piece = restorer.tail()
                         if piece:
                             yield piece
-                    piece = restorer.tail()
-                    if piece:
-                        yield piece
+                    else:
+                        async for chunk in upstream_response.aiter_bytes():
+                            yield chunk
                 finally:
                     await upstream_response.aclose()
 

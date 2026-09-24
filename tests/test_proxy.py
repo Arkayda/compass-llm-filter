@@ -789,3 +789,135 @@ def test_sse_tool_args_digit_tail_released_once():
     args = "".join(re.findall(r'"partial_json":"((?:[^"\\]|\\.)*)"', out.decode()))
     args = json.loads(f'"{args}"')
     assert json.loads(args) == {"query": "отчёт по расписанию", "top_k": 8}
+
+
+# --- регрессы аудита: прокси-слой ---
+
+@pytest.mark.asyncio
+async def test_v1_llm_paths_not_blocked_by_console_auth():
+    # регресс: basic-auth консоли защищал весь префикс /v1/* и отдавал 401
+    # LLM-клиентам (POST /v1/chat/completions с Bearer-ключом)
+    settings = make_settings(auth_user="compass", auth_password="s3cret")
+
+    async def ok(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    app = create_app(settings, upstream_transport=MockTransport(ok))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://c") as client:
+        resp = await client.post("/v1/chat/completions",
+                                 headers={"Authorization": "Bearer sk-very-long-key-123456"},
+                                 json=chat_payload("текст"))
+        assert resp.status_code == 200
+        assert (await client.get("/v1/models")).status_code == 200
+        # управляющие эндпоинты и консоль по-прежнему под паролем
+        assert (await client.get("/v1/settings")).status_code == 401
+        assert (await client.get("/v1/rules")).status_code == 401
+        assert (await client.get("/v1/sandbox")).status_code == 401
+        assert (await client.get("/console")).status_code == 401
+
+
+def test_sanitize_error_msg_masks_kv_and_query_secrets():
+    # регресс: r"\g<0>=***" оставлял значение секрета в тексте ошибки
+    from compass_llm_filter.proxy.app import _sanitize_error_msg
+    msg = ("connect failed to http://api.test/v1?key=superquerysecret123 and "
+           "api_key=supersecret123 rejected")
+    out = _sanitize_error_msg(msg)
+    assert "supersecret123" not in out
+    assert "superquerysecret123" not in out
+    assert "api_key=***" in out
+    assert "key=***" in out
+
+
+def test_private_upstream_rejected_unless_allowed():
+    # SSRF-защита: внутренние адреса апстрима запрещены, если явно не разрешены
+    with pytest.raises(ValueError, match="(?i)upstream"):
+        create_app(make_settings(upstream_base_url="http://127.0.0.1:9000"))
+    with pytest.raises(ValueError):
+        create_app(make_settings(upstream_base_url="http://169.254.169.254/latest"))
+    with pytest.raises(ValueError):
+        create_app(make_settings(upstream_base_url="http://10.0.0.5:8080"))
+    with pytest.raises(ValueError):
+        create_app(make_settings(upstream_base_url="http://localhost:9000"))
+    # локальный мок для разработки — только с явного флага
+    assert create_app(make_settings(upstream_base_url="http://127.0.0.1:9000",
+                                    allow_private_upstream=True))
+    # доменные имена и публичные IP не ограничиваем
+    assert create_app(make_settings(upstream_base_url="http://fake-llm:9000"))
+    assert create_app(make_settings(upstream_base_url="http://8.8.8.8"))
+
+
+@pytest.mark.asyncio
+async def test_security_headers_on_error_responses():
+    # 401/403 от мидлварей тоже должны уезжать с security-заголовками
+    settings = make_settings(auth_user="compass", auth_password="s3cret")
+
+    async def ok(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    app = create_app(settings, upstream_transport=MockTransport(ok))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://c") as client:
+        r401 = await client.get("/console")
+        assert r401.status_code == 401
+        assert "default-src 'self'" in r401.headers.get("content-security-policy", "")
+        assert r401.headers.get("x-frame-options") == "DENY"
+
+
+@pytest.mark.asyncio
+async def test_detect_mode_sse_streamed_through_untouched(monkeypatch):
+    # detect (shadow) не должен буферизовать SSE до конца ответа: поток
+    # уходит клиенту по мере прихода, без SSERestorer
+    import compass_llm_filter.proxy.app as app_mod
+
+    raw = ('data: {"choices": [{"delta": {"content": "текст"}}]}\n\n'
+           "data: [DONE]\n\n")
+    streamed = {"flag": False}
+    orig = app_mod.StreamingResponse
+
+    class Spy(orig):
+        def __init__(self, *args, **kwargs):
+            streamed["flag"] = True
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(app_mod, "StreamingResponse", Spy)
+
+    def upstream(request):
+        return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                              content=raw.encode())
+
+    app = create_app(make_settings(mode="detect"), upstream_transport=MockTransport(upstream))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        resp = await client.post("/chat/completions", json=chat_payload("текст"))
+        assert resp.status_code == 200
+        assert resp.text == raw  # байт-в-байт, без переформатирования
+    assert streamed["flag"], "SSE в detect-режиме обязан идти через StreamingResponse"
+
+
+@pytest.mark.asyncio
+async def test_masked_dict_keys_collision_keeps_entries():
+    # два разных ключа, маскирующихся в одинаковый [CARD], не должны молча
+    # схлопываться: апстрим обязан получить оба значения словаря
+    seen = []
+
+    async def echo_full_body(request: httpx.Request) -> httpx.Response:
+        content = json.loads(request.content)
+        seen.append({"body": content})
+        return httpx.Response(200, json=content)
+
+    app = create_app(make_settings(anonymization_mode="placeholders"),
+                     upstream_transport=MockTransport(echo_full_body))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://c") as client:
+        resp = await client.post("/v1/data", json={"meta": {
+            "4111 1111 1111 1111": "a", "4111111111111111": "b"}})
+        assert resp.status_code == 200
+    assert len(seen[0]["body"]["meta"]) == 2
+    assert set(seen[0]["body"]["meta"].values()) == {"a", "b"}
+
+
+def test_sse_data_line_single_space_semantics():
+    # по спецификации SSE у data-поля убирается РОВНО ОДИН ведущий пробел;
+    # .strip() искажал payload с значимыми дополнительными пробелами
+    from compass_llm_filter.proxy.app import SSERestorer
+    anon = Anonymizer()
+    r = SSERestorer(anon)
+    out = r.feed_bytes("data:   два ведущих пробела\n\n".encode())
+    assert out.decode() == "data:   два ведущих пробела\n\n"
