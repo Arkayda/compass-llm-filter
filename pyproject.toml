@@ -31,6 +31,7 @@ proxy = [
     "httpx>=0.27",
 ]
 dev = [
+    "compass-llm-filter[proxy]",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
 ]

@@ -146,7 +146,7 @@ compass-llm-filter/
 ├── ARCHITECTURE.md                    # Концептуальная архитектура
 ├── INTERNAL.md                        # Заметки по внутренней реализации
 ├── docker/
-│   └── Dockerfile                     # Non-root multi-stage образ с HEALTHCHECK
+│   └── Dockerfile                     # Non-root образ с HEALTHCHECK
 ├── docs/
 │   └── DEVELOPER_GUIDE.md             # Настоящий архитектурный справочник
 ├── examples/
@@ -166,8 +166,9 @@ compass-llm-filter/
 │       ├── ratelimit.py               # Скользящий In-Memory Rate Limiter с потокобезопасностью
 │       ├── rules.py                   # Модель CustomRule, State, ReDoS-валидатор, права 0600
 │       ├── console.html               # Zero-CDN веб-консоль (Dark Mode, Side-by-Side, Scorecard)
+│       ├── console.js                 # JS консоли отдельным файлом (строгий CSP, data-action делегирование)
 │       └── logo.svg                   # Векторный логотип
-└── tests/                             # 139 автоматических тестов (pytest)
+└── tests/                             # 200 автоматических тестов (pytest)
     ├── test_anonymizer.py             # Тесты анонимайзера, IPv6, маркеров подстановок
     ├── test_injection.py              # Тесты детектора Prompt Injection
     ├── test_proxy.py                  # Интеграционные тесты прокси, CSP, CSRF, rate limit, JSON keys
@@ -247,7 +248,7 @@ return random.Random(seed)
 - Формируется `reverse_map()`: `{фейк: оригинал}`.
 - Неоднозначные фейки (если два разных оригинала получили одну замену) исключаются из карты.
 - Замена выполняется строго от самых длинных фейков к самым коротким.
-- Словарные слова восстанавливаются по границам слов (`(?<![\wА-Яа-яЁё@.\-])fake(?![\wА-Яа-яЁё@.\-])`).
+- Словарные слова восстанавливаются по границам слов (`(?<![\w])fake(?![\w])`).
 
 ### 3.5 Самопроверка на утечки (`leaks_in_text`)
 Перед отправкой запроса во внешний мир вызывается `anon.leaks_in_text(masked_text)`:
@@ -285,16 +286,17 @@ return random.Random(seed)
 
 ## 5. Тестирование
 
-Проект покрыт 139 автоматическими тестами:
+Проект покрыт 200 автоматическими тестами:
 
 ```bash
 .venv/bin/pytest -v
 ```
 
 Структура тестового комплекта:
-- `tests/test_anonymizer.py` (23 теста): проверка базового маскирования, IPv6, детерминизма, предотвращения marker injection, контекстно-зависимого leak-check (исключает ложные срабатывания на путях файлов вроде `sh/cron/crontab.cron`), линейность конвейера на длинных текстах.
-- `tests/test_injection.py` (9 тестов): проверка детекции попыток Prompt Injection и Jailbreak.
-- `tests/test_proxy.py` (60 тестов): интеграция FastAPI, SSE-потоки (белый список листьев стриминга STREAM_LEAVES, атомарная передача enum stop_reason и base64-сигнатур, сброс хвостов на границах блоков), CSP-заголовки, CSRF-защита, rate-limiting, очистка ошибок, маскирование query-параметров.
-- `tests/test_ru_pii.py` (19 тестов): паспорта РФ, СНИЛС, ИНН-10/12, ОГРН, банковские карты, IBAN.
-- `tests/test_secrets.py` (14 тестов): приватные PEM-ключи, connection strings с IP/IPv6, Bearer, токены провайдеров.
+- `tests/test_anonymizer.py` (30 тестов): проверка базового маскирования, IPv6 (включая защиту C++/SQL-синтаксиса от ложного маскирования), детерминизм, предотвращение marker injection, контекстно-зависимый leak-check, линейность конвейера на длинных текстах.
+- `tests/test_injection.py` (12 тестов): детекция Prompt Injection и Jailbreak (RU вежливые формы, EN-варианты, отрицания «не забудь»/«don't»).
+- `tests/test_proxy.py` (90 тестов): интеграция FastAPI, SSE-потоки (STREAM_LEAVES, атомарные enum/сигнатуры, сброс хвостов, pairing event:/data:), CSP, CSRF (включая песочницу), rate-limiting, очистка ошибок, маскирование query-параметров, SSRF-валидация апстрима, бинарные ответы, сжатые тела, ReDoS-валидатор правил.
+- `tests/test_ru_pii.py` (28 тестов): паспорта РФ, СНИЛС, ИНН-10/12, ОГРН, банковские карты 12–19 цифр, IBAN, защита фейков ранних фаз от повторного маскирования.
+- `tests/test_secrets.py` (26 тестов): приватные PEM-ключи, connection strings (включая одиночные хосты localhost/db), Bearer, токены провайдеров, form-preserving фейки.
+- `tests/test_validators.py` (14 тестов): контрольные суммы (Лун, СНИЛС, ИНН, ОГРН, IBAN), детерминизм ГПСЧ с перцем.
 - `tests/test_validators.py` (14 тестов): математические алгоритмы Луна, СНИЛС, ИНН, ОГРН, IBAN mod 97, соль ГПСЧ.

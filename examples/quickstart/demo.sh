@@ -3,6 +3,10 @@
 # Показывает, что увидел провайдер (замаскированный текст, из лога fake-llm —
 # он вне прокси) и что получил клиент (оригиналы восстановлены).
 # Запуск: bash demo.sh [COMPASS_URL]
+#
+# Без docker (fake_llm.py на 127.0.0.1:9000): запускайте прокси с
+# COMPASS_ALLOW_PRIVATE_UPSTREAM=true — иначе SSRF-защита отклонит
+# loopback-апстрим. Docker-compose (хост fake-llm) работает без флага.
 set -euo pipefail
 
 COMPASS_URL="${1:-http://localhost:8080}"
