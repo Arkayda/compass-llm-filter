@@ -25,8 +25,11 @@ function toggleTheme() {
 const TABS = ['overview', 'settings', 'rules', 'sandbox', 'audit'];
 
 function showTab(name) {
-  document.querySelectorAll('nav button').forEach(b =>
-    b.classList.toggle('active', b.dataset.tab === name));
+  document.querySelectorAll('nav button').forEach(b => {
+    const selected = b.dataset.tab === name;
+    b.classList.toggle('active', selected);
+    b.setAttribute('aria-selected', selected ? 'true' : 'false');
+  });
   TABS.forEach(t => $('tab-' + t).hidden = t !== name);
   if (name === 'audit') loadAudit();
 }
@@ -49,10 +52,63 @@ document.addEventListener('click', (e) => {
   }
 });
 
-async function api(path, opts) {
-  const resp = await fetch(path, opts && {headers: {'Content-Type': 'application/json'}, ...opts});
-  return resp.json();
+// Аккуратное форматирование поля detail из тела ошибки API:
+// строки — как есть; объекты и списки (FastAPI 400/409/422) — как «loc: msg»
+function formatDetail(detail) {
+  if (detail === undefined || detail === null || detail === '') return '';
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) {
+    return detail.map(item => {
+      if (item && typeof item === 'object' && item.msg) {
+        const loc = Array.isArray(item.loc) ? item.loc.join('.') : item.loc;
+        return loc ? loc + ': ' + item.msg : String(item.msg);
+      }
+      return formatDetail(item);
+    }).join('; ');
+  }
+  if (typeof detail === 'object') {
+    if (detail.msg !== undefined) return String(detail.msg);
+    if (detail.message !== undefined) return String(detail.message);
+    try { return JSON.stringify(detail); } catch (e) { return ''; }
+  }
+  return String(detail);
 }
+
+// Единая обёртка над fetch: сначала читаем текст, затем пробуем распарсить JSON.
+// Так не падаем на пустом теле (401), plain-text ошибках (500) и сетевых сбоях;
+// при !resp.ok бросаем Error с кодом статуса и человекочитаемым описанием.
+async function api(path, opts) {
+  let resp;
+  try {
+    resp = await fetch(path, opts && {headers: {'Content-Type': 'application/json'}, ...opts});
+  } catch (e) {
+    throw new Error('Сеть недоступна (' + ((e && e.message) || e) + ')');
+  }
+  const text = await resp.text();
+  let data = null;
+  if (text) { try { data = JSON.parse(text); } catch (e) { data = null; } }
+  if (!resp.ok) {
+    const raw = (data && data.detail !== undefined) ? data.detail : text.trim();
+    const err = new Error('HTTP ' + resp.status + (resp.statusText ? ' ' + resp.statusText : '') +
+      ': ' + (formatDetail(raw) || 'нет деталей'));
+    err.status = resp.status;
+    throw err;
+  }
+  return data;
+}
+
+// Строка статуса для сообщений об ошибках («Настройки», «Правила», «Песочница»):
+// message == null — скрыть; isError — красная «пилюля», иначе обычная подсказка
+function setStatus(id, message, isError) {
+  const el = $(id);
+  if (!el) return;
+  if (!message) { el.textContent = ''; el.style.display = 'none'; return; }
+  el.textContent = message;
+  el.className = isError ? 'pill bad' : 'hint';
+  el.style.display = '';
+}
+
+function errText(e) { return (e && e.message) ? e.message : String(e); }
 
 const MODE_TITLES = {
   enforce: ['enforce — маскирование', 'ok'],
@@ -67,12 +123,23 @@ const ANON_TITLES = {
   placeholders: 'подстановки: плейсхолдеры',
 };
 
+// ——— Защита несохранённых настроек от затирания опросом (loadOverview каждые 5 с) ———
+// Селект, который администратор уже изменил (но ещё не нажал «Применить»)
+// или который сейчас в фокусе, опросом не перезаписывается.
+const settingsDirty = new Set();
+function setIfPristine(id, value) {
+  const el = $(id);
+  if (!el || settingsDirty.has(id) || document.activeElement === el) return;
+  el.value = value;
+}
+
 async function loadOverview() {
   try {
     const health = await api('/healthz');
     $('upstream-info').textContent = health.upstream;
-    $('set-mode').value = health.mode; $('set-fail').value = health.fail_mode;
-    $('set-anon').value = health.anonymization_mode;
+    setIfPristine('set-mode', health.mode);
+    setIfPristine('set-fail', health.fail_mode);
+    setIfPristine('set-anon', health.anonymization_mode);
     const [mode, modeCls] = MODE_TITLES[health.mode] || [health.mode, 'muted'];
     const [fail, failCls] = FAIL_TITLES[health.fail_mode] || [health.fail_mode, 'muted'];
     $('ov-badges').innerHTML =
@@ -144,10 +211,17 @@ async function loadOverview() {
 }
 
 async function saveSettings() {
-  await api('/v1/settings', {method: 'PUT', body: JSON.stringify({
-    mode: $('set-mode').value, fail_mode: $('set-fail').value,
-    anonymization_mode: $('set-anon').value})});
-  loadOverview();
+  try {
+    await api('/v1/settings', {method: 'PUT', body: JSON.stringify({
+      mode: $('set-mode').value, fail_mode: $('set-fail').value,
+      anonymization_mode: $('set-anon').value})});
+    settingsDirty.clear(); // успешно сохранено — снова доверяем значениям сервера
+    setStatus('set-status', null);
+    loadOverview();
+  } catch (e) {
+    console.error(e);
+    setStatus('set-status', 'Не удалось сохранить настройки: ' + errText(e), true);
+  }
 }
 
 async function loadDetectors() {
@@ -163,46 +237,71 @@ async function loadDetectors() {
 }
 
 async function loadRules() {
-  const data = await api('/v1/rules');
-  const body = $('rules-body');
-  if (!data.rules.length) { body.innerHTML = '<tr><td colspan="5" class="empty">правил пока нет</td></tr>'; return; }
-  body.innerHTML = data.rules.map(r => `<tr>
-    <td>${esc(r.name)}</td><td class="mono">${esc(r.pattern)}</td>
-    <td>${r.replacement === 'fake' ? 'fake' : esc(r.placeholder)}</td>
-    <td><span class="pill ${r.enabled ? 'ok' : 'warn'}">${r.enabled ? 'вкл' : 'выкл'}</span></td>
-    <td>
-      <button class="btn ghost small" data-action="toggle-rule" data-id="${esc(r.id)}" data-enabled="${r.enabled ? '1' : '0'}">${r.enabled ? 'выключить' : 'включить'}</button>
-      <button class="btn ghost small" data-action="delete-rule" data-id="${esc(r.id)}">удалить</button>
-    </td></tr>`).join('');
+  try {
+    const data = await api('/v1/rules');
+    const body = $('rules-body');
+    if (!data.rules.length) { body.innerHTML = '<tr><td colspan="5" class="empty">правил пока нет</td></tr>'; setStatus('rules-status', null); return; }
+    body.innerHTML = data.rules.map(r => `<tr>
+      <td>${esc(r.name)}</td><td class="mono">${esc(r.pattern)}</td>
+      <td>${r.replacement === 'fake' ? 'fake' : esc(r.placeholder)}</td>
+      <td><span class="pill ${r.enabled ? 'ok' : 'warn'}">${r.enabled ? 'вкл' : 'выкл'}</span></td>
+      <td>
+        <button class="btn ghost small" data-action="toggle-rule" data-id="${esc(r.id)}" data-enabled="${r.enabled ? '1' : '0'}">${r.enabled ? 'выключить' : 'включить'}</button>
+        <button class="btn ghost small" data-action="delete-rule" data-id="${esc(r.id)}">удалить</button>
+      </td></tr>`).join('');
+    setStatus('rules-status', null);
+  } catch (e) {
+    console.error(e);
+    // не оставляем ложное «правил пока нет» при сбое загрузки
+    $('rules-body').innerHTML = '<tr><td colspan="5" class="empty">Не удалось загрузить правила</td></tr>';
+    setStatus('rules-status', 'Не удалось загрузить правила: ' + errText(e), true);
+  }
 }
 
 async function addRule() {
+  setStatus('rules-status', null);
   try {
     const res = await api('/v1/rules', {method: 'POST', body: JSON.stringify({
       name: $('rule-name').value, pattern: $('rule-pattern').value,
       replacement: $('rule-replacement').value, placeholder: $('rule-placeholder').value})});
-    if (res.detail) {
-      alert('Ошибка добавления правила: ' + res.detail);
+    if (res && res.detail) {
+      // на случай, если бэкенд отвечает 200 с описанием ошибки валидации
+      setStatus('rules-status', 'Ошибка добавления правила: ' + formatDetail(res.detail), true);
+      return;
     }
+    // успех — очищаем поля формы
+    $('rule-name').value = ''; $('rule-pattern').value = ''; $('rule-placeholder').value = '';
     loadRules();
   } catch (e) {
-    alert('Ошибка сети или валидации: ' + e);
+    console.error(e);
+    setStatus('rules-status', 'Ошибка добавления правила: ' + errText(e), true);
   }
 }
 
 async function toggleRule(id, enabled) {
-  await api('/v1/rules/' + id, {method: 'PATCH', body: JSON.stringify({enabled})}); loadRules();
+  try {
+    await api('/v1/rules/' + id, {method: 'PATCH', body: JSON.stringify({enabled})}); loadRules();
+  } catch (e) {
+    console.error(e);
+    setStatus('rules-status', 'Не удалось изменить правило: ' + errText(e), true);
+  }
 }
 async function deleteRule(id) {
-  await api('/v1/rules/' + id, {method: 'DELETE'}); loadRules();
+  try {
+    await api('/v1/rules/' + id, {method: 'DELETE'}); loadRules();
+  } catch (e) {
+    console.error(e);
+    setStatus('rules-status', 'Не удалось удалить правило: ' + errText(e), true);
+  }
 }
 
-// Sandbox view switching
-let currentSbView = 'diff';
+// Sandbox view switching: активная кнопка — класс .active,
+// видимость контейнеров — через style.display (currentSbView не нужен)
 function setSbView(mode) {
-  currentSbView = mode;
   document.querySelectorAll('.sb-tab-btn').forEach(btn => {
-    btn.classList.toggle('active', btn.dataset.view === mode);
+    const selected = btn.dataset.view === mode;
+    btn.classList.toggle('active', selected);
+    btn.setAttribute('aria-selected', selected ? 'true' : 'false');
   });
   $('sb-view-diff').style.display = mode === 'diff' ? 'grid' : 'none';
   $('sb-view-restored').style.display = mode === 'restored' ? 'block' : 'none';
@@ -282,54 +381,70 @@ async function runSandbox() {
   let entities = [];
   try { entities = JSON.parse($('sb-entities').value || '[]'); } catch (e) {}
   const text = $('sb-text').value;
+  setStatus('sb-status', null);
+  try {
+    const data = await api('/v1/sandbox', {method: 'POST', body: JSON.stringify({text, entities})});
 
-  const data = await api('/v1/sandbox', {method: 'POST', body: JSON.stringify({text, entities})});
+    // Injection Banner
+    if (data.injections && data.injections.length > 0) {
+      $('sb-injection-alert').style.display = 'flex';
+      $('sb-injection-text').textContent = 'Обнаружены сигнатуры: ' + data.injections.join(', ');
+    } else {
+      $('sb-injection-alert').style.display = 'none';
+    }
 
-  // Injection Banner
-  if (data.injections && data.injections.length > 0) {
-    $('sb-injection-alert').style.display = 'flex';
-    $('sb-injection-text').textContent = 'Обнаружены сигнатуры: ' + data.injections.join(', ');
-  } else {
-    $('sb-injection-alert').style.display = 'none';
+    // Legend
+    $('sb-legend').style.display = (data.replacements && data.replacements.length > 0) ? 'flex' : 'none';
+
+    // Highlighted Side-by-Side
+    $('sb-diff-orig').innerHTML = highlightText(text, data.replacements, false);
+    $('sb-diff-masked').innerHTML = highlightText(data.masked || '', data.replacements, true);
+    bindHoverSync();
+
+    // Raw and restored views
+    $('sb-raw-masked').textContent = data.masked || '—';
+    $('sb-restored').textContent = data.restored || '—';
+
+    $('sb-stats').innerHTML = 'Всего замен: ' + (data.replacements ? data.replacements.length : 0) +
+      ' · Утечки: ' + (data.leaks === 0
+        ? '<span class="pill ok">0 — чисто</span>'
+        : `<span class="pill bad">${data.leaks} — маскирование не удалось</span>`);
+  } catch (e) {
+    console.error(e);
+    setStatus('sb-status', 'Маскирование не выполнено: ' + errText(e), true);
   }
-
-  // Legend
-  $('sb-legend').style.display = (data.replacements && data.replacements.length > 0) ? 'flex' : 'none';
-
-  // Highlighted Side-by-Side
-  $('sb-diff-orig').innerHTML = highlightText(text, data.replacements, false);
-  $('sb-diff-masked').innerHTML = highlightText(data.masked || '', data.replacements, true);
-  bindHoverSync();
-
-  // Raw and restored views
-  $('sb-raw-masked').textContent = data.masked || '—';
-  $('sb-restored').textContent = data.restored || '—';
-
-  $('sb-stats').innerHTML = 'Всего замен: ' + (data.replacements ? data.replacements.length : 0) +
-    ' · Утечки: ' + (data.leaks === 0
-      ? '<span class="pill ok">0 — чисто</span>'
-      : `<span class="pill bad">${data.leaks} — маскирование не удалось</span>`);
 }
 
 async function loadAudit() {
-  const data = await api('/v1/audit/records');
-  const body = $('audit-body');
-  if (!data.records.length) { body.innerHTML = '<tr><td colspan="7" class="empty">записей нет</td></tr>'; return; }
-  body.innerHTML = data.records.slice().reverse().map(r => `<tr>
-    <td class="mono">${new Date(r.ts * 1000).toLocaleTimeString('ru-RU')}</td>
-    <td class="mono">${esc(r.path)}</td>
-    <td>${esc(r.mode || '—')}</td>
-    <td class="mono">${r.detected ? Object.entries(r.detected).map(([k, v]) => k + ':' + v).join(' ') : '—'}</td>
-    <td class="mono">${r.entities ?? '—'}</td>
-    <td>${r.injections && r.injections.length
-      ? `<span class="tags">${r.injections.map(t => `<span class="pill bad">${esc(t)}</span>`).join('')}</span>`
-      : '<span class="pill muted">—</span>'}</td>
-    <td>${r.blocked
-      ? `<span class="pill bad">заблокирован</span>${r.reason ? '<div class="hint" style="margin:4px 0 0">' + esc(r.reason) + '</div>' : ''}`
-      : '<span class="pill ok">ок</span>'}</td>
-  </tr>`).join('');
+  try {
+    const data = await api('/v1/audit/records');
+    const body = $('audit-body');
+    if (!data.records.length) { body.innerHTML = '<tr><td colspan="7" class="empty">записей нет</td></tr>'; return; }
+    body.innerHTML = data.records.slice().reverse().map(r => `<tr>
+      <td class="mono">${new Date(r.ts * 1000).toLocaleTimeString('ru-RU')}</td>
+      <td class="mono">${esc(r.path)}</td>
+      <td>${esc(r.mode || '—')}</td>
+      <td class="mono">${r.detected ? esc(Object.entries(r.detected).map(([k, v]) => k + ':' + v).join(' ')) : '—'}</td>
+      <td class="mono">${r.entities ?? '—'}</td>
+      <td>${r.injections && r.injections.length
+        ? `<span class="tags">${r.injections.map(t => `<span class="pill bad">${esc(t)}</span>`).join('')}</span>`
+        : '<span class="pill muted">—</span>'}</td>
+      <td>${r.blocked
+        ? `<span class="pill bad">заблокирован</span>${r.reason ? '<div class="hint" style="margin:4px 0 0">' + esc(r.reason) + '</div>' : ''}`
+        : '<span class="pill ok">ок</span>'}</td>
+    </tr>`).join('');
+  } catch (e) {
+    console.error(e);
+    $('audit-body').innerHTML = '<tr><td colspan="7" class="empty">Не удалось загрузить журнал аудита</td></tr>';
+  }
 }
 
 initTheme();
+// помечаем селекты настроек «грязными» при ручном изменении,
+// чтобы периодический опрос не затирал несохранённый выбор
+['set-mode', 'set-fail', 'set-anon'].forEach(id => {
+  const el = $(id);
+  if (el) el.addEventListener('change', () => settingsDirty.add(id));
+});
 loadOverview(); loadRules(); loadDetectors();
 setInterval(loadOverview, 5000);

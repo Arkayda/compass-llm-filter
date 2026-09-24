@@ -216,24 +216,24 @@
   <aside class="side">
     <div class="logo"><img src="/logo.svg" alt="Compass"></div>
     <div class="sec">Разделы</div>
-    <nav>
-      <button data-action="show-tab" data-tab="overview" class="active">
+    <nav role="tablist">
+      <button data-action="show-tab" data-tab="overview" class="active" role="tab" aria-selected="true" aria-controls="tab-overview">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
         Обзор
       </button>
-      <button data-action="show-tab" data-tab="settings">
+      <button data-action="show-tab" data-tab="settings" role="tab" aria-selected="false" aria-controls="tab-settings">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.08a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.08a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.08a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         Настройки
       </button>
-      <button data-action="show-tab" data-tab="rules">
+      <button data-action="show-tab" data-tab="rules" role="tab" aria-selected="false" aria-controls="tab-rules">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l8 3v6c0 5-3.5 9-8 11-4.5-2-8-6-8-11V5z"/></svg>
         Правила
       </button>
-      <button data-action="show-tab" data-tab="sandbox">
+      <button data-action="show-tab" data-tab="sandbox" role="tab" aria-selected="false" aria-controls="tab-sandbox">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 2v6.3L4.6 18a2 2 0 0 0 1.8 3h11.2a2 2 0 0 0 1.8-3L14 8.3V2"/><path d="M8.5 2h7"/><path d="M7 14h10"/></svg>
         Песочница
       </button>
-      <button data-action="show-tab" data-tab="audit">
+      <button data-action="show-tab" data-tab="audit" role="tab" aria-selected="false" aria-controls="tab-audit">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
         Аудит
       </button>
@@ -249,7 +249,7 @@
   <main class="main">
 
   <!-- ОБЗОР -->
-  <section id="tab-overview">
+  <section id="tab-overview" role="tabpanel">
     <!-- Security Scorecard -->
     <div class="scorecard" id="ov-scorecard">
       <div class="score-info">
@@ -293,26 +293,26 @@
   </section>
 
   <!-- НАСТРОЙКИ -->
-  <section id="tab-settings" hidden>
+  <section id="tab-settings" role="tabpanel" hidden>
     <div class="card">
       <h2>Режим работы</h2>
       <div class="row">
         <div>
-          <label>Режим</label>
+          <label for="set-mode">Режим</label>
           <select id="set-mode">
             <option value="enforce">enforce — маскировать трафик</option>
             <option value="detect">detect — только считать (shadow)</option>
           </select>
         </div>
         <div>
-          <label>Поведение при сбое маскирования</label>
+          <label for="set-fail">Поведение при сбое маскирования</label>
           <select id="set-fail">
             <option value="closed">closed — блокировать запрос (503)</option>
             <option value="open">open — пропускать как есть</option>
           </select>
         </div>
         <div>
-          <label>Подстановки</label>
+          <label for="set-anon">Подстановки</label>
           <select id="set-anon">
             <option value="fake">fake — реалистичные</option>
             <option value="placeholders">placeholders — [PHONE] и т.п.</option>
@@ -320,51 +320,53 @@
         </div>
       </div>
       <button class="btn" data-action="save-settings">Применить</button>
+      <div class="hint" id="set-status" style="display:none; margin-top:8px;"></div>
       <div class="hint">Изменения применяются немедленно без перезапуска сервиса.</div>
     </div>
   </section>
 
   <!-- ПРАВИЛА -->
-  <section id="tab-rules" hidden>
+  <section id="tab-rules" role="tabpanel" hidden>
     <div class="card">
       <h2>Новое правило</h2>
       <div class="row">
-        <div><label>Название</label><input type="text" id="rule-name" placeholder="Внутренний номер заказа"></div>
-        <div><label>Regex (python)</label><input type="text" id="rule-pattern" placeholder="ORD-\d{6}"></div>
+        <div><label for="rule-name">Название</label><input type="text" id="rule-name" placeholder="Внутренний номер заказа"></div>
+        <div><label for="rule-pattern">Regex (python)</label><input type="text" id="rule-pattern" placeholder="ORD-\d{6}"></div>
       </div>
       <div class="row">
         <div>
-          <label>Замена</label>
+          <label for="rule-replacement">Замена</label>
           <select id="rule-replacement">
             <option value="fake">fake — мусор той же формы</option>
             <option value="placeholder">placeholder</option>
           </select>
         </div>
-        <div><label>Плейсхолдер (если выбран)</label><input type="text" id="rule-placeholder" value="[ORDER]"></div>
+        <div><label for="rule-placeholder">Плейсхолдер (если выбран)</label><input type="text" id="rule-placeholder" value="[ORDER]"></div>
       </div>
       <button class="btn" data-action="add-rule">Добавить правило</button>
       <div class="hint">Паттерн автоматически проверяется на ReDoS (катастрофический возврат и вложенные квантификаторы).</div>
     </div>
     <div class="card">
       <h2>Пользовательские правила</h2>
-      <table><thead><tr><th>Название</th><th>Regex</th><th>Замена</th><th>Статус</th><th></th></tr></thead>
+      <table><thead><tr><th scope="col">Название</th><th scope="col">Regex</th><th scope="col">Замена</th><th scope="col">Статус</th><th scope="col"></th></tr></thead>
       <tbody id="rules-body"><tr><td colspan="5" class="empty">правил пока нет</td></tr></tbody></table>
+      <div class="hint" id="rules-status" style="display:none; margin-top:8px;"></div>
     </div>
     <div class="card">
       <div class="card-h">
         <h2>Встроенные детекторы</h2>
         <span class="hint" style="margin:0">зашиты в ядро, включены всегда</span>
       </div>
-      <table><thead><tr><th>Тип</th><th>Пример</th><th>Как работает</th></tr></thead>
+      <table><thead><tr><th scope="col">Тип</th><th scope="col">Пример</th><th scope="col">Как работает</th></tr></thead>
       <tbody id="detectors-body"><tr><td colspan="3" class="empty">загрузка…</td></tr></tbody></table>
     </div>
   </section>
 
   <!-- ПЕСОЧНИЦА -->
-  <section id="tab-sandbox" hidden>
+  <section id="tab-sandbox" role="tabpanel" hidden>
     <div class="card">
       <h2>Песочница маскирования</h2>
-      <label>Текст (как в сообщении клиента)</label>
+      <label for="sb-text">Текст (как в сообщении клиента)</label>
       <textarea id="sb-text">Добрый день! Не можем провести оплату — проверьте, пожалуйста, наши реквизиты.
 
 ООО Ромашка, ИНН 7707083893, ОГРН 1027700132195, договор № 8892834271636.
@@ -391,7 +393,7 @@ Google-ключ: AIzaA1b2C3d4E5f6g7H8i9J0k1L2m3N4o5P6q7R8
 
 Внутренний номер заказа: ORD-435921.</textarea>
 
-      <label>Известные сущности (JSON-массив; аналог заголовка X-Compass-Entities)</label>
+      <label for="sb-entities">Известные сущности (JSON-массив; аналог заголовка X-Compass-Entities)</label>
       <input type="text" id="sb-entities" value='["ООО Ромашка", "Иванов Пётр Сергеевич", "Смирнова Анна Игоревна"]'>
 
       <div style="display:flex; gap:12px; align-items:center;">
@@ -421,14 +423,14 @@ Google-ключ: AIzaA1b2C3d4E5f6g7H8i9J0k1L2m3N4o5P6q7R8
       </div>
 
       <!-- Переключатель видов -->
-      <div class="sb-view-controls">
-        <button class="sb-tab-btn active" data-action="sb-view" data-view="diff">Сравнение Side-by-Side</button>
-        <button class="sb-tab-btn" data-action="sb-view" data-view="restored">Восстановленный ответ</button>
-        <button class="sb-tab-btn" data-action="sb-view" data-view="raw">Чистый текст</button>
+      <div class="sb-view-controls" role="tablist">
+        <button class="sb-tab-btn active" data-action="sb-view" data-view="diff" role="tab" aria-selected="true" aria-controls="sb-view-diff">Сравнение Side-by-Side</button>
+        <button class="sb-tab-btn" data-action="sb-view" data-view="restored" role="tab" aria-selected="false" aria-controls="sb-view-restored">Восстановленный ответ</button>
+        <button class="sb-tab-btn" data-action="sb-view" data-view="raw" role="tab" aria-selected="false" aria-controls="sb-view-raw">Чистый текст</button>
       </div>
 
       <!-- Вид 1: Side-by-side -->
-      <div id="sb-view-diff" class="side-by-side">
+      <div id="sb-view-diff" class="side-by-side" role="tabpanel">
         <div class="diff-col">
           <h3>Оригинал (от клиента)</h3>
           <div id="sb-diff-orig">—</div>
@@ -440,13 +442,13 @@ Google-ключ: AIzaA1b2C3d4E5f6g7H8i9J0k1L2m3N4o5P6q7R8
       </div>
 
       <!-- Вид 2: Восстановленный -->
-      <div id="sb-view-restored" style="display:none;">
+      <div id="sb-view-restored" role="tabpanel" style="display:none;">
         <label>Что вернётся клиенту (после восстановления)</label>
         <div class="out" id="sb-restored">—</div>
       </div>
 
       <!-- Вид 3: Сырой текст -->
-      <div id="sb-view-raw" style="display:none;">
+      <div id="sb-view-raw" role="tabpanel" style="display:none;">
         <label>Сырой замаскированный текст</label>
         <div class="out" id="sb-raw-masked">—</div>
       </div>
@@ -456,13 +458,13 @@ Google-ключ: AIzaA1b2C3d4E5f6g7H8i9J0k1L2m3N4o5P6q7R8
   </section>
 
   <!-- АУДИТ -->
-  <section id="tab-audit" hidden>
+  <section id="tab-audit" role="tabpanel" hidden>
     <div class="card">
       <div class="card-h">
         <h2>Журнал безопасности и запросов</h2>
         <button class="btn ghost small" data-action="load-audit">Обновить</button>
       </div>
-      <table><thead><tr><th>Время</th><th>Путь</th><th>Режим</th><th>Найдено</th><th>Сущн.</th><th>Инъекции</th><th>Статус</th></tr></thead>
+      <table><thead><tr><th scope="col">Время</th><th scope="col">Путь</th><th scope="col">Режим</th><th scope="col">Найдено</th><th scope="col">Сущн.</th><th scope="col">Инъекции</th><th scope="col">Статус</th></tr></thead>
       <tbody id="audit-body"><tr><td colspan="7" class="empty">записей нет</td></tr></tbody></table>
     </div>
   </section>
