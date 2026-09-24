@@ -167,7 +167,7 @@ compass-llm-filter/
 │       ├── rules.py                   # Модель CustomRule, State, ReDoS-валидатор, права 0600
 │       ├── console.html               # Zero-CDN веб-консоль (Dark Mode, Side-by-Side, Scorecard)
 │       └── logo.svg                   # Векторный логотип
-└── tests/                             # 129 автоматических тестов (pytest)
+└── tests/                             # 139 автоматических тестов (pytest)
     ├── test_anonymizer.py             # Тесты анонимайзера, IPv6, маркеров подстановок
     ├── test_injection.py              # Тесты детектора Prompt Injection
     ├── test_proxy.py                  # Интеграционные тесты прокси, CSP, CSRF, rate limit, JSON keys
@@ -272,7 +272,9 @@ return random.Random(seed)
 4. Перед маркером `[DONE]` сбрасываются все синтетические остатки.
 
 ### 4.3 Безопасность HTTP и CSRF-защита
-- **Security Headers Middleware**: автоматически проставляет заголовки `Content-Security-Policy: default-src 'self'`, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`.
+- **Security Headers Middleware**: автоматически проставляет заголовки `Content-Security-Policy` (строгий `script-src 'self'` — весь JS консоли вынесен в `/console.js`, обработчики через data-action делегирование), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`. Мидлварь внешняя: заголовки попадают и в 401/403.
+- **Маскирование query-параметров**: значения (`?q=Иван Иванов`) прогоняются через тот же конвейер и per-request `Anonymizer`, что и тело; имена параметров не трогаются. Leak-check и ошибки подчиняются общей fail-политике.
+- **Лимит применения кастомных правил**: строки длиннее `MAX_RULE_INPUT_CHARS` (256 КБ) при включённых правилах уводят запрос в fail-политику (503/оригинал), песочница отвечает 400.
 - **CSRF Protection Middleware**: проверяет запросы `POST/PUT/PATCH/DELETE` к `/v1/settings` и `/v1/rules`:
   - `Sec-Fetch-Site: cross-site` -> HTTP 403.
   - Несовпадение `Origin` или `Referer` с заголовком `Host` -> HTTP 403.
@@ -283,16 +285,16 @@ return random.Random(seed)
 
 ## 5. Тестирование
 
-Проект покрыт 129 автоматическими тестами:
+Проект покрыт 139 автоматическими тестами:
 
 ```bash
 .venv/bin/pytest -v
 ```
 
 Структура тестового комплекта:
-- `tests/test_anonymizer.py` (22 теста): проверка базового маскирования, IPv6, детерминизма, предотвращения marker injection, контекстно-зависимого leak-check (исключает ложные срабатывания на путях файлов вроде `sh/cron/crontab.cron`).
+- `tests/test_anonymizer.py` (23 теста): проверка базового маскирования, IPv6, детерминизма, предотвращения marker injection, контекстно-зависимого leak-check (исключает ложные срабатывания на путях файлов вроде `sh/cron/crontab.cron`), линейность конвейера на длинных текстах.
 - `tests/test_injection.py` (9 тестов): проверка детекции попыток Prompt Injection и Jailbreak.
-- `tests/test_proxy.py` (51 тест): интеграция FastAPI, SSE-потоки (белый список листьев стриминга STREAM_LEAVES, атомарная передача enum stop_reason и base64-сигнатур, сброс хвостов на границах блоков), CSP-заголовки, CSRF-защита, rate-limiting, очистка ошибок.
+- `tests/test_proxy.py` (60 тестов): интеграция FastAPI, SSE-потоки (белый список листьев стриминга STREAM_LEAVES, атомарная передача enum stop_reason и base64-сигнатур, сброс хвостов на границах блоков), CSP-заголовки, CSRF-защита, rate-limiting, очистка ошибок, маскирование query-параметров.
 - `tests/test_ru_pii.py` (19 тестов): паспорта РФ, СНИЛС, ИНН-10/12, ОГРН, банковские карты, IBAN.
 - `tests/test_secrets.py` (14 тестов): приватные PEM-ключи, connection strings с IP/IPv6, Bearer, токены провайдеров.
 - `tests/test_validators.py` (14 тестов): математические алгоритмы Луна, СНИЛС, ИНН, ОГРН, IBAN mod 97, соль ГПСЧ.
