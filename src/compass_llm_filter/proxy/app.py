@@ -658,6 +658,48 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         anon: Anonymizer | None = None
         detect_only = state.mode == "detect"
         injections: list[str] = []
+        forward_query = None  # None — проксировать query как есть
+        passthrough = False   # fail-open где-то: весь запрос уходит оригиналом
+
+        def _new_anon() -> Anonymizer:
+            a = Anonymizer(mode=state.anonymization_mode)
+            for entity in entities:
+                a.register_entity(entity)
+            return a
+
+        # ПДн в query-параметрах (?q=Иван Иванов): маскируем значения тем же
+        # конвейером, что и тело; имена параметров не трогаем (контракт API)
+        if list(request.query_params.keys()):
+            try:
+                q_anon = anon or _new_anon()
+                masked_pairs = [
+                    (k, _apply_custom_rules(q_anon.sanitize_string(v), q_anon, state))
+                    for k, v in request.query_params.multi_items()
+                ]
+                if any(q_anon.leaks_in_text(v) for _k, v in masked_pairs):
+                    metrics.inc("compass_blocked_total")
+                    state.audit_push(request_id=request_id, path=path, blocked=True,
+                                     reason="leak-check failed (query)",
+                                     injections=list(set(injections)))
+                    if state.fail_mode == "closed":
+                        return JSONResponse(status_code=503, content={
+                            "detail": "compass: anonymization failed, request blocked"})
+                    metrics.inc("compass_failopen_total")
+                    passthrough = True
+                else:
+                    anon = q_anon
+                    if not detect_only:
+                        forward_query = masked_pairs
+            except Exception:
+                metrics.inc("compass_mask_errors_total")
+                if state.fail_mode == "closed":
+                    state.audit_push(request_id=request_id, path=path, blocked=True,
+                                     reason="masking error (query)",
+                                     injections=list(set(injections)))
+                    return JSONResponse(status_code=503, content={
+                        "detail": "compass: masking error, request blocked"})
+                metrics.inc("compass_failopen_total")
+                passthrough = True
 
         if request.method in MASKABLE_METHODS and raw_body:
             try:
@@ -670,37 +712,39 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
                         injections.extend(inj)
                 if injections:
                     metrics.inc("compass_prompt_injections_total", len(injections))
-                try:
-                    anon = Anonymizer(mode=state.anonymization_mode)
-                    for entity in entities:
-                        anon.register_entity(entity)
-                    masked_payload = _apply_custom_rules(
-                        _mask_strings(payload, anon), anon, state)
-                    for text in _iter_strings(masked_payload):
-                        if anon.leaks_in_text(text):
-                            metrics.inc("compass_blocked_total")
+                if not passthrough:
+                    try:
+                        if anon is None:
+                            anon = _new_anon()
+                        masked_payload = _apply_custom_rules(
+                            _mask_strings(payload, anon), anon, state)
+                        for text in _iter_strings(masked_payload):
+                            if anon.leaks_in_text(text):
+                                metrics.inc("compass_blocked_total")
+                                state.audit_push(request_id=request_id, path=path, blocked=True,
+                                                 reason="leak-check failed",
+                                                 injections=list(set(injections)))
+                                if state.fail_mode == "closed":
+                                    return JSONResponse(status_code=503, content={
+                                        "detail": "compass: anonymization failed, request blocked"})
+                                # fail-open: пропускаем оригинал целиком
+                                metrics.inc("compass_failopen_total")
+                                anon = None
+                                forward_query = None
+                                break
+                        if anon is not None and not detect_only:
+                            body_to_send = json.dumps(masked_payload, ensure_ascii=False).encode()
+                    except Exception:
+                        metrics.inc("compass_mask_errors_total")
+                        if state.fail_mode == "closed":
                             state.audit_push(request_id=request_id, path=path, blocked=True,
-                                             reason="leak-check failed",
+                                             reason="masking error",
                                              injections=list(set(injections)))
-                            if state.fail_mode == "closed":
-                                return JSONResponse(status_code=503, content={
-                                    "detail": "compass: anonymization failed, request blocked"})
-                            # fail-open: пропускаем оригинал
-                            metrics.inc("compass_failopen_total")
-                            anon = None
-                            break
-                    if anon is not None and not detect_only:
-                        body_to_send = json.dumps(masked_payload, ensure_ascii=False).encode()
-                except Exception:
-                    metrics.inc("compass_mask_errors_total")
-                    if state.fail_mode == "closed":
-                        state.audit_push(request_id=request_id, path=path, blocked=True,
-                                         reason="masking error",
-                                         injections=list(set(injections)))
-                        return JSONResponse(status_code=503, content={
-                            "detail": "compass: masking error, request blocked"})
-                    metrics.inc("compass_failopen_total")
-                    anon = None
+                            return JSONResponse(status_code=503, content={
+                                "detail": "compass: masking error, request blocked"})
+                        metrics.inc("compass_failopen_total")
+                        anon = None
+                        forward_query = None
 
         if anon is not None:
             for key, value in anon.stats.items():
@@ -717,7 +761,7 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         upstream_request = app.state.compass_client.build_request(
             request.method, f"/{path}",
             headers=headers, content=body_to_send,
-            params=request.query_params,
+            params=forward_query if forward_query is not None else request.query_params,
         )
         try:
             upstream_response = await app.state.compass_client.send(

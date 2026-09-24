@@ -1005,3 +1005,54 @@ async def test_console_js_protected_by_auth():
     app = create_app(settings, upstream_transport=MockTransport(ok))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://c") as client:
         assert (await client.get("/console.js")).status_code == 401
+
+
+# --- ПДн в query-параметрах ---
+
+@pytest.mark.asyncio
+async def test_query_params_masked_enforce_mode():
+    # регресс: значения query (?q=Иван Иванов, тел ...) уходили апстриму как есть
+    seen = []
+
+    def upstream(request):
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json={"q": request.url.params.get("q", "")})
+
+    app = create_app(make_settings(), upstream_transport=MockTransport(upstream))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        resp = await client.get("/search", params={"q": f"найди {PHONE}, пишет Иван Иванов"},
+                                headers={"X-Compass-Entities": json.dumps(["Иван Иванов"])})
+        assert resp.status_code == 200
+    assert PHONE not in seen[0]["q"]
+    assert "Иван Иванов" not in seen[0]["q"]
+    # и восстановились в ответе
+    assert PHONE in resp.json()["q"]
+    assert "Иван Иванов" in resp.json()["q"]
+
+
+@pytest.mark.asyncio
+async def test_query_params_detect_mode_passthrough():
+    seen = []
+
+    def upstream(request):
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json={})
+
+    app = create_app(make_settings(mode="detect"), upstream_transport=MockTransport(upstream))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        await client.get("/search", params={"q": f"найди {PHONE}"})
+    assert seen[0]["q"] == f"найди {PHONE}"
+
+
+@pytest.mark.asyncio
+async def test_query_params_without_pii_untouched():
+    seen = []
+
+    def upstream(request):
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json={})
+
+    app = create_app(make_settings(), upstream_transport=MockTransport(upstream))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        await client.get("/models", params={"model": "glm-4.7", "limit": "10"})
+    assert seen[0] == {"model": "glm-4.7", "limit": "10"}
