@@ -1056,3 +1056,41 @@ async def test_query_params_without_pii_untouched():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
         await client.get("/models", params={"model": "glm-4.7", "limit": "10"})
     assert seen[0] == {"model": "glm-4.7", "limit": "10"}
+
+
+# --- ReDoS: суперлинейные паттерны и лимит длины для кастомных правил ---
+
+@pytest.mark.asyncio
+async def test_redos_polynomial_pattern_rejected():
+    # (a+)(a+)(a+)$ — кубический возврат без запрещённых эвристикой конструкций:
+    # на зондах из 18-40 символов незаметен, на мегабайтном теле вешал бы воркер
+    async with make_client(make_settings(), []) as client:
+        resp = await client.post("/v1/rules", json={"pattern": r"(a+)(a+)(a+)$"})
+        assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_custom_rules_too_long_string_fail_closed():
+    # строка длиннее лимита применения правил: гарантировать маскировку нельзя —
+    # fail-closed блокирует запрос, а не молча пропускает (или зависает)
+    seen = []
+    app = create_app(make_settings(), upstream_transport=echo_upstream(seen))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        created = await client.post("/v1/rules", json={"name": "ord", "pattern": "ORD-\\d{6}"})
+        rule_id = created.json()["id"]
+        big = "текст " + "x" * (300 * 1024) + " ORD-123456"
+        resp = await client.post("/chat/completions", json=chat_payload(big))
+        assert resp.status_code == 503
+        assert seen == []
+        # без правил тот же текст проходит
+        await client.delete(f"/v1/rules/{rule_id}")
+        resp2 = await client.post("/chat/completions", json=chat_payload("заказ ORD-123456"))
+        assert resp2.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_sandbox_too_long_string_400():
+    async with make_client(make_settings(), []) as client:
+        await client.post("/v1/rules", json={"pattern": "ORD-\\d{6}"})
+        resp = await client.post("/v1/sandbox", json={"text": "x" * (300 * 1024)})
+        assert resp.status_code == 400

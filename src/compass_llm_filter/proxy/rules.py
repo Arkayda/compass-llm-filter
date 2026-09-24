@@ -69,6 +69,15 @@ DANGEROUS_ALT = re.compile(
 )
 
 
+class RuleInputTooLong(Exception):
+    """Строка длиннее лимита применения кастомных правил: на мегабайтных
+    текстах даже прошедший валидацию паттерн может узреть полиномиальный
+    возврат — гарантируть маскировку нельзя, вызов обязан уйти в fail-политику."""
+
+
+MAX_RULE_INPUT_CHARS = 256 * 1024
+
+
 def validate_safe_regex(pattern: str) -> None:
     """Защита от ReDoS (catastrophic backtracking): проверка структуры квантификаторов
     и тестовый прогон на повторяющихся строках."""
@@ -82,15 +91,27 @@ def validate_safe_regex(pattern: str) -> None:
         compiled = re.compile(pattern)
     except re.error as exc:
         raise ValueError(f"invalid regex: {exc}") from exc
-    # зонды трёх длин: короткие ловят быстрые взрывы, длинные — медленно
-    # растущие (экспонента с малой базой на 18 символах ещё незаметна)
-    for s, budget in (("a" * 18 + "!", 0.015), ("1" * 18 + "!", 0.015),
-                      (" " * 18 + "!", 0.015), ("a" * 28 + "!", 0.025),
-                      ("1" * 28 + "!", 0.025), ("a" * 40 + "!", 0.025)):
+
+    def timed(s: str) -> float:
         t0 = time.perf_counter()
         compiled.search(s)
-        if time.perf_counter() - t0 > budget:
-            raise ValueError("regex execution timeout (catastrophic backtracking risk)")
+        return time.perf_counter() - t0
+
+    # цепочка зондов 20 -> 60 -> 200 по трём алфавитам: короткие ловят быстрые
+    # взрывы, длинные — медленный рост; отношение t(200)/t(20) отсекает
+    # суперлинейные (квадратичные и хуже) паттерны, безобидные на малых зондах
+    for alphabet in ("a", "1", " "):
+        base = None
+        for n in (20, 60, 200):
+            s = alphabet * n + "!"
+            timed(s)  # прогрев
+            dt = timed(s)
+            if dt > 0.05:
+                raise ValueError("regex execution timeout (catastrophic backtracking risk)")
+            if base is None:
+                base = max(dt, 1e-6)
+            elif dt / base > 50:
+                raise ValueError("superlinear regex growth (catastrophic backtracking risk)")
 
 
 class State:

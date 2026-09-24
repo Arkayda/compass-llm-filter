@@ -31,7 +31,8 @@ from compass_llm_filter.core.validators import set_default_pepper
 from compass_llm_filter.proxy.config import Settings
 from compass_llm_filter.proxy.metrics import Metrics
 from compass_llm_filter.proxy.ratelimit import RateLimiter
-from compass_llm_filter.proxy.rules import State
+from compass_llm_filter.proxy.rules import (MAX_RULE_INPUT_CHARS, RuleInputTooLong,
+                                            State)
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -349,6 +350,11 @@ def _apply_custom_rules(obj, anon: Anonymizer, state, depth: int = 0):
     if depth > MAX_RECURSION_DEPTH:
         return obj
     if isinstance(obj, str):
+        # на мегабайтных строках правило может уйти в полиномиальный возврат:
+        # гарантировать маскировку нельзя — уходим в fail-политику запроса
+        if len(obj) > MAX_RULE_INPUT_CHARS and any(
+                r.enabled for r in state.rules.values()):
+            raise RuleInputTooLong(len(obj))
         for rule in state.rules.values():
             if rule.enabled:
                 obj = rule.apply(obj, anon)
@@ -600,7 +606,11 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         # тот же конвейер, что у прокси-пути: сперва встроенные детекторы, затем
         # кастомные правила — иначе песочница (и построенное на ней превью в
         # хелпеске) соврала бы, покажет меньше, чем уйдёт провайдеру
-        masked = _apply_custom_rules(_mask_strings(text, anon), anon, state)
+        try:
+            masked = _apply_custom_rules(_mask_strings(text, anon), anon, state)
+        except RuleInputTooLong:
+            return JSONResponse(status_code=400, content={
+                "detail": f"text exceeds custom-rule input limit ({MAX_RULE_INPUT_CHARS} chars)"})
         injections = detect_prompt_injection(text)
         replacements = [
             {

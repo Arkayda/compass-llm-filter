@@ -290,3 +290,16 @@ def test_case_variant_domains_get_distinct_fakes():
     cleaned = anon.sanitize_string(text)
     assert cleaned.split()[-1] != cleaned.split()[2]  # фейки различны
     assert anon.de_anonymize(cleaned) == text
+
+
+def test_masking_long_word_run_is_linear():
+    # регресс: RE_EMAIL без lookbehind давал O(n^2) на длинных без-@ словах —
+    # 300КБ обычного текста вешали конвейер на минуты
+    import time
+    anon = Anonymizer()
+    t0 = time.perf_counter()
+    masked = anon.sanitize_string("текст " + "x" * 200_000 + " конец")
+    dt = time.perf_counter() - t0
+    assert dt < 5.0, f"конвейер нелинеен: {dt:.1f}s"
+    assert "x" * 1000 in masked
+    assert anon.leaks_in_text(masked) == 0
