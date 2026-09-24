@@ -18,6 +18,12 @@ class RateLimiter:
     def is_allowed(self, key: str) -> bool:
         now = time.time()
         with self._lock:
+            # ключи никогда не удалялись — медленная утечка памяти по числу IP
+            if len(self._records) > 4096:
+                cutoff = now - self.window_seconds
+                for stale in [k for k, q in self._records.items()
+                              if not q or q[-1] < cutoff]:
+                    del self._records[stale]
             queue = self._records[key]
             # Удаляем запросы старше окна
             cutoff = now - self.window_seconds

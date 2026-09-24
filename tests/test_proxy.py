@@ -921,3 +921,51 @@ def test_sse_data_line_single_space_semantics():
     r = SSERestorer(anon)
     out = r.feed_bytes("data:   два ведущих пробела\n\n".encode())
     assert out.decode() == "data:   два ведущих пробела\n\n"
+
+
+@pytest.mark.asyncio
+async def test_redos_alternation_without_inner_quantifier_rejected():
+    # регресс: (a|aa)+$ проходит эвристику (квантификатора внутри группы нет),
+    # а зонд из 18 символов не ловит экспоненциальный рост (~x8 на 4 символа)
+    async with make_client(make_settings(), []) as client:
+        for pattern in (r"(a|aa)+$", r"(a|b|ab)+$"):
+            resp = await client.post("/v1/rules", json={"pattern": pattern})
+            assert resp.status_code == 400, pattern
+
+
+@pytest.mark.asyncio
+async def test_rule_id_validated():
+    # регресс: произвольный id правила попадал в inline-onclick консоли — XSS
+    async with make_client(make_settings(), []) as client:
+        evil = await client.post("/v1/rules", json={
+            "id": "x');alert(1);//", "pattern": "ORD-\\d{3}"})
+        assert evil.status_code == 400
+        ok = await client.post("/v1/rules", json={
+            "id": "order-rule-1", "pattern": "ORD-\\d{3}"})
+        assert ok.status_code == 200
+        assert ok.json()["id"] == "order-rule-1"
+
+
+def test_metrics_one_type_line_per_family():
+    # регресс: каждое значение label давало свою строку # TYPE — Prometheus
+    # отвергает дубликаты TYPE одного семейства при scrape
+    from compass_llm_filter.proxy.metrics import Metrics
+    m = Metrics()
+    m.inc("compass_masked_total", 1, type="phones")
+    m.inc("compass_masked_total", 2, type="emails")
+    out = m.render()
+    assert out.count("# TYPE compass_masked_total counter") == 1
+    assert 'compass_masked_total{type="phones"} 1' in out
+    assert 'compass_masked_total{type="emails"} 2' in out
+
+
+def test_ratelimiter_purges_stale_keys():
+    import time as _time
+    from compass_llm_filter.proxy.ratelimit import RateLimiter
+    rl = RateLimiter(max_requests=5, window_seconds=0.3)
+    for i in range(4200):
+        rl.is_allowed(f"ip-{i}")
+    assert len(rl._records) > 4000  # набрали ключей, чистка не трогает свежие
+    _time.sleep(0.35)
+    rl.is_allowed("trigger")  # окно истекло — чистка должна сработать
+    assert len(rl._records) < 100

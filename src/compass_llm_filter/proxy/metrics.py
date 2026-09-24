@@ -17,11 +17,14 @@ class Metrics:
 
     def render(self) -> str:
         lines = []
+        seen_types: set[str] = set()
         for key in sorted(self._counters):
             name, _, label_part = key.partition("{")
+            # одна строка # TYPE на семейство: дубликаты ломают scrape Prometheus
+            if name not in seen_types:
+                seen_types.add(name)
+                lines.append(f"# TYPE {name} counter")
             label_part = label_part.rstrip("}")
             metric = f"{name}{{{label_part}}}" if label_part else name
-            help_name = name.split("{")[0]
-            lines.append(f"# TYPE {help_name} counter")
             lines.append(f"{metric} {self._counters[key]:g}")
         return "\n".join(lines) + "\n"

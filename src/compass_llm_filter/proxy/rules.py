@@ -62,6 +62,11 @@ class CustomRule:
 DANGEROUS_NESTED = re.compile(
     r"\((?:\?[a-zA-Z0-9_:=!<>]+)?[^)]*(\+|\*|\?|\{\d+,?\d*\})[^)]*\)\s*(\+|\*|\{\d+,?\d*\})"
 )
+# группа с альтернативами под квантификатором: перекрывающиеся варианты
+# (a|aa)+ дают экспоненциальный возврат без единого квантификатора внутри
+DANGEROUS_ALT = re.compile(
+    r"\((?:\?[a-zA-Z0-9_:=!<>]+)?[^()|]*\|[^()]*\)\s*(\+|\*|\{\d+,\d*\})"
+)
 
 
 def validate_safe_regex(pattern: str) -> None:
@@ -71,16 +76,20 @@ def validate_safe_regex(pattern: str) -> None:
         raise ValueError("pattern is required")
     if len(pattern) > 300:
         raise ValueError("pattern too long (max 300 characters)")
-    if DANGEROUS_NESTED.search(pattern):
+    if DANGEROUS_NESTED.search(pattern) or DANGEROUS_ALT.search(pattern):
         raise ValueError("potentially vulnerable regex (nested quantifiers detected)")
     try:
         compiled = re.compile(pattern)
     except re.error as exc:
         raise ValueError(f"invalid regex: {exc}") from exc
-    for s in ("a" * 18 + "!", "1" * 18 + "!", " " * 18 + "!"):
+    # зонды трёх длин: короткие ловят быстрые взрывы, длинные — медленно
+    # растущие (экспонента с малой базой на 18 символах ещё незаметна)
+    for s, budget in (("a" * 18 + "!", 0.015), ("1" * 18 + "!", 0.015),
+                      (" " * 18 + "!", 0.015), ("a" * 28 + "!", 0.025),
+                      ("1" * 28 + "!", 0.025), ("a" * 40 + "!", 0.025)):
         t0 = time.perf_counter()
         compiled.search(s)
-        if time.perf_counter() - t0 > 0.015:
+        if time.perf_counter() - t0 > budget:
             raise ValueError("regex execution timeout (catastrophic backtracking risk)")
 
 
@@ -152,8 +161,12 @@ class State:
         replacement = data.get("replacement", "placeholder")
         if replacement not in ("placeholder", "fake"):
             raise ValueError("replacement must be placeholder|fake")
+        rule_id = data.get("id") or uuid.uuid4().hex[:8]
+        # id попадает в DOM консоли (inline-onclick) — только безопасный алфавит
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", rule_id):
+            raise ValueError("id must match [A-Za-z0-9_-]{1,64}")
         rule = CustomRule(
-            id=data.get("id") or uuid.uuid4().hex[:8],
+            id=rule_id,
             name=data.get("name") or pattern[:40],
             pattern=pattern,
             replacement=replacement,

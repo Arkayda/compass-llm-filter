@@ -472,7 +472,7 @@ Google-ключ: AIzaA1b2C3d4E5f6g7H8i9J0k1L2m3N4o5P6q7R8
 
 <script>
 const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 // Управление темами (Dark / Light)
 function initTheme() {
@@ -628,8 +628,8 @@ async function loadRules() {
     <td>${r.replacement === 'fake' ? 'fake' : esc(r.placeholder)}</td>
     <td><span class="pill ${r.enabled ? 'ok' : 'warn'}">${r.enabled ? 'вкл' : 'выкл'}</span></td>
     <td>
-      <button class="btn ghost small" onclick="toggleRule('${r.id}', ${!r.enabled})">${r.enabled ? 'выключить' : 'включить'}</button>
-      <button class="btn ghost small" onclick="deleteRule('${r.id}')">удалить</button>
+      <button class="btn ghost small" onclick="toggleRule('${esc(r.id)}', ${!r.enabled})">${r.enabled ? 'выключить' : 'включить'}</button>
+      <button class="btn ghost small" onclick="deleteRule('${esc(r.id)}')">удалить</button>
     </td></tr>`).join('');
 }
 
