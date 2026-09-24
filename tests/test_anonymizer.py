@@ -254,3 +254,39 @@ def test_leak_check_catches_real_leftover():
     assert "ivan.ivanov@romashka.ru" not in cleaned
     assert anon.leaks_in_text(cleaned + " и продублируйте на ivan.ivanov@romashka.ru") >= 1
     assert anon.leaks_in_text(cleaned) == 0
+
+
+def test_registered_name_masked_in_any_case():
+    # регресс: сравнение имён было регистрозависимым — «ИВАН ИВАНОВ» уходил
+    # провайдеру как есть, и leak-check (тоже регистрозависимый) это пропускал
+    anon = Anonymizer(mode="fake")
+    anon.register_entity("Иван Иванов")
+    cleaned = anon.sanitize_string("ИВАН ИВАНОВ кричал, а Иван ИВАНОВ шептал")
+    assert "ИВАН ИВАНОВ" not in cleaned
+    assert "Иван ИВАНОВ" not in cleaned
+    assert anon.leaks_in_text(cleaned) == 0
+    assert anon.de_anonymize(cleaned) == "Иван Иванов кричал, а Иван Иванов шептал"
+
+
+def test_reconcile_keeps_substitutions_in_sync():
+    # регресс: при перегенерации фейка (случайное совпадение с реальным именем)
+    # новый алиас не попадал в _substitutions — de_anonymize терял имя
+    anon = Anonymizer(mode="fake")
+    anon.register_entity("Иван Петров")
+    anon.register_entity("Пётр Смирнов")
+    # симулируем совпадение: фейк второй сущности содержит реальное имя первой
+    anon._register("Пётр Смирнов", "Иван Петров Смирнов")
+    text = "Иван Петров и Пётр Смирнов в одном тикете"
+    masked = anon.sanitize_string(text)  # prepare() -> reconcile() перегенерит фейк
+    assert "Иван Петров Смирнов" not in masked
+    assert anon.de_anonymize(masked) == text
+
+
+def test_case_variant_domains_get_distinct_fakes():
+    # регресс: хеш фейка считался от lower() — «Corp.Ru» и «corp.ru» давали
+    # один фейк, карта отбрасывала неоднозначность, домен не восстанавливался
+    anon = Anonymizer(mode="fake")
+    text = "зайдите на Corp.Ru и corp.ru"
+    cleaned = anon.sanitize_string(text)
+    assert cleaned.split()[-1] != cleaned.split()[2]  # фейки различны
+    assert anon.de_anonymize(cleaned) == text

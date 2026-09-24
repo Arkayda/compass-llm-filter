@@ -179,3 +179,62 @@ def test_iban_invalid_checksum_not_iban():
     assert "GB82 WEST" in cleaned
     assert "1234 5698 7654 31" not in cleaned
     assert anon.stats["ibans"] == 0
+
+
+def test_iban_not_swallowed_by_uppercase_tail():
+    # регресс: жадные группы забирали ЗАГЛАВНЫЕ слова после IBAN, чек-сумма
+    # не сходилась и валидный IBAN оставался нераспознанным
+    anon = Anonymizer()
+    text = "реквизиты GB82 WEST 1234 5698 7654 32 AND MORE DATA смотрите"
+    cleaned = anon.sanitize_string(text)
+    assert anon.stats["ibans"] == 1
+    assert "GB82 WEST 1234 5698 7654 32" not in cleaned
+    assert "AND MORE DATA" in cleaned
+    assert anon.de_anonymize(cleaned) == text
+
+
+def test_iban_max_length_34_masked():
+    # BBAN длиннее 26 символов отвергался IBAN_RE — 34-символьный (максимум
+    # ISO 13616) IBAN не маскировался вообще
+    from compass_llm_filter.core.validators import iban_check_digits
+    bban = "1" * 30
+    full = "ZZ" + iban_check_digits("ZZ", bban) + bban
+    assert len(full) == 34
+    anon = Anonymizer()
+    cleaned = anon.sanitize_string(f"счёт {full} подтверждён")
+    assert full not in cleaned
+    assert anon.stats["ibans"] == 1
+    assert anon.de_anonymize(cleaned) == f"счёт {full} подтверждён"
+
+
+def test_fake_snils_valid_when_control_number_is_100():
+    # взвешенная сумма с остатком 100 (mod 101): контрольного числа «100» не
+    # существует, фейк обязан перегенерироваться с валидной суммой
+    from compass_llm_filter.core.validators import snils_check_digits, snils_ok
+    from compass_llm_filter.core.ru_pii import fake_snils
+    def total(n9: str) -> int:
+        return sum(int(d) * (9 - j) for j, d in enumerate(n9))
+
+    number9 = next(str(i).zfill(9) for i in range(1, 10_000_000)
+                   if total(str(i).zfill(9)) == 201)
+    assert snils_check_digits(number9) == "100"  # невалидное контрольное число
+
+    # ищем оригинал, у которого ПЕРВАЯ попытка генерации попадает на «плохую»
+    # сумму — ретрай обязан дать валидный СНИЛС из 11 цифр
+    from compass_llm_filter.core.validators import det_rng
+
+    def first_generated_n9(digits_11: str) -> str:
+        rng = det_rng("snils", digits_11, 0)
+        return "".join(rng.choice("0123456789") for _ in range(9))
+
+    trigger = None
+    for i in range(1, 20000):
+        d = str(i).zfill(9) + "64"
+        t = total(first_generated_n9(d))
+        if t > 101 and t % 101 == 100:
+            trigger = d
+            break
+    assert trigger is not None
+    fake = fake_snils(trigger, trigger)
+    fdigits = "".join(c for c in fake if c.isdigit())
+    assert len(fdigits) == 11 and snils_ok(fdigits)

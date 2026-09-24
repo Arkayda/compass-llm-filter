@@ -94,9 +94,9 @@ def _fake_host(host: str) -> str:
         base = rng.choice(["192.0.2.", "198.51.100.", "203.0.113."])
         return base + str(rng.randrange(1, 255))
     if host.startswith("[") and host.endswith("]"):
-        code = hashlib.sha256(host.lower().encode()).hexdigest()[:4]
+        code = hashlib.sha256(host.encode()).hexdigest()[:4]
         return f"[2001:db8::{code}]"
-    code = hashlib.sha256(host.lower().encode()).hexdigest()[:8]
+    code = hashlib.sha256(host.encode()).hexdigest()[:8]
     labels = host.split(".")
     if len(labels) >= 3:
         return f"{labels[0]}.{code}.example.com"

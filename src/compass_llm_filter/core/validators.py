@@ -31,7 +31,7 @@ def det_rng(*parts, pepper: str | None = None) -> random.Random:
 def fake_digits(digits: str, extra: int = 0) -> str:
     """Другие цифры той же длины, первая не 0."""
     fake = digits
-    for attempt in range(extra, extra + 5):
+    for attempt in range(extra, extra + 64):
         rng = det_rng("digits", digits, attempt)
         first = rng.choice("123456789")
         fake = first + "".join(rng.choice("0123456789") for _ in range(len(digits) - 1))
@@ -90,7 +90,10 @@ def snils_check_digits(number9: str) -> str:
         return f"{total:02d}"
     if total in (100, 101):
         return "00"
-    return f"{total % 101:02d}"
+    check = total % 101
+    if check > 99:  # 100 не помещается в две контрольные цифры — СНИЛС с такой суммой не существует
+        return "100"
+    return f"{check:02d}"
 
 
 INN10_W = (2, 4, 10, 3, 5, 9, 4, 6, 8)
@@ -143,7 +146,7 @@ def ogrnip_check(number14: str) -> str:
 
 # --- IBAN ---
 
-IBAN_RE = re.compile(r"[A-Z]{2}\d{2}[A-Z0-9]{10,26}")
+IBAN_RE = re.compile(r"[A-Z]{2}\d{2}[A-Z0-9]{10,30}")
 
 
 def _iban_numeric(s: str) -> str:

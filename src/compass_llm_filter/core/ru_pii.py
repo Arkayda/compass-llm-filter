@@ -54,9 +54,14 @@ def fake_card(original: str, digits: str) -> str:
 
 
 def fake_snils(original: str, digits: str) -> str:
-    rng = det_rng("snils", digits)
-    number9 = "".join(rng.choice("0123456789") for _ in range(9))
-    return _keep_layout(original, number9 + snils_check_digits(number9))
+    number9, check = digits[:9], "00"
+    for attempt in range(64):
+        rng = det_rng("snils", digits, attempt)
+        number9 = "".join(rng.choice("0123456789") for _ in range(9))
+        check = snils_check_digits(number9)
+        if len(check) == 2:
+            break
+    return _keep_layout(original, number9 + check)
 
 
 def fake_inn10(original: str, digits: str) -> str:
@@ -114,6 +119,18 @@ RULES = [
 ]
 
 
+def _iban_best_prefix(original: str, validate) -> str | None:
+    """Жадный матч RE_IBAN забирает и ЗАГЛАВНЫЕ слова за IBAN («... 32 AND MORE
+    DATA»), из-за чего чек-сумма не сходится. Откатываемся по целым группам
+    (с конца) и возвращаем самый длинный валидный префикс."""
+    ends = [mm.end() for mm in re.finditer(r"[A-Z0-9]+", original)]
+    for k in range(len(ends), 0, -1):
+        candidate = original[:ends[k - 1]]
+        if validate("".join(ch for ch in candidate if ch.isalnum()).upper()):
+            return candidate
+    return None
+
+
 def apply(s: str, anon, only: tuple = (), skip: tuple = (), mark_late: bool = False) -> str:
     """Прогнать текст по правилам идентификаторов.
 
@@ -137,13 +154,20 @@ def apply(s: str, anon, only: tuple = (), skip: tuple = (), mark_late: bool = Fa
                 out = anon._secret_mark(fake_value) if mark_late else fake_value
                 return prefix + out
 
-            original = m.group(0)
-            candidate = _x(original)
+            whole = m.group(0)
+            tail = ""
+            if _k == "ibans":
+                best = _iban_best_prefix(whole, _v)
+                if best is None:
+                    return whole
+                tail = whole[len(best):]  # слова за IBAN не съедаем
+                whole = best
+            candidate = _x(whole)
             if not _v(candidate):
-                return original  # сумма не сошлась — не наш идентификатор
-            fake_value = _f(original, candidate) if anon.fake else _p
-            anon._record(original, fake_value)
+                return whole  # сумма не сошлась — не наш идентификатор
+            fake_value = _f(whole, candidate) if anon.fake else _p
+            anon._record(whole, fake_value)
             anon.stats[_k] = anon.stats.get(_k, 0) + 1
-            return anon._secret_mark(fake_value) if mark_late else fake_value
+            return (anon._secret_mark(fake_value) if mark_late else fake_value) + tail
         s = regex.sub(repl, s)
     return s

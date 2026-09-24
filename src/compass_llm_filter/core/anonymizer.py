@@ -181,6 +181,10 @@ class Anonymizer:
             return None
         if value in self.name_map:
             return self.name_map[value]
+        # тот же человек в другом регистре — не отдельная сущность
+        for existing, alias in self.name_map.items():
+            if existing.casefold() == value.casefold():
+                return alias
         if self.fake and (kind == "org" or
                           (kind == "auto" and re.match(
                               r"^(ООО|ОАО|ЗАО|ПАО|АО|ИП|ФГУП|ФГБУ|НКО|Фонд|Компания)\b",
@@ -275,6 +279,13 @@ class Anonymizer:
                 self._used_aliases.discard(fake_value)
                 del self.name_map[real]
                 self.alias_for_name(real, avoid=real_names)
+                # в _substitutions осталась бы пара со старым фейком —
+                # de_anonymize не знал бы нового и терял бы имя
+                new_fake = self.name_map[real]
+                self._substitutions = [
+                    (real, new_fake) if r == real else (r, f)
+                    for r, f in self._substitutions
+                ]
 
     # --- компиляция замен (выполняется один раз после сбора имён) ---
 
@@ -306,16 +317,19 @@ class Anonymizer:
             return f"\x00m_{self._nonce}_{len(values) - 1}\x00"
 
         full_alts = "|".join(re.escape(r) for r, _ in cyr_items)
-        full_re = re.compile(rf"\b(?:{full_alts})\b") if full_alts else None
-        full_marks = {real: mark(alias) for real, alias in cyr_items}
+        # IGNORECASE: имя в тексте может быть набрано капсом («ИВАН ИВАНОВ»),
+        # регистрозависимый пропуск пропускал и маскирование, и leak-check
+        full_re = re.compile(rf"\b(?:{full_alts})\b", re.IGNORECASE) if full_alts else None
+        full_marks = {real.casefold(): mark(alias) for real, alias in cyr_items}
 
         lat_re = None
         lat_marks = {}
         if lat_items:
             lat_alts = "|".join(re.escape(r) for r, _ in
                                 sorted(lat_items, key=lambda kv: -len(kv[0])))
-            lat_re = re.compile(rf"(?<!{CODE_BOUND})@?(?:{lat_alts})(?!{CODE_BOUND})")
-            lat_marks = {r: mark(a) for r, a in lat_items}
+            lat_re = re.compile(rf"(?<!{CODE_BOUND})@?(?:{lat_alts})(?!{CODE_BOUND})",
+                                re.IGNORECASE)
+            lat_marks = {r.casefold(): mark(a) for r, a in lat_items}
 
         ph_re = re.compile(rf"\x00m_{self._nonce}_(\d+)\x00")
 
@@ -326,10 +340,12 @@ class Anonymizer:
 
         # детектор утечек: не осталось ли реальных имён/ников после чистки
         leak_parts = [re.escape(r) for r, _ in cyr_items]
-        self._leak_re = re.compile(rf"\b(?:{'|'.join(leak_parts)})\b") if leak_parts else None
+        self._leak_re = re.compile(rf"\b(?:{'|'.join(leak_parts)})\b",
+                                   re.IGNORECASE) if leak_parts else None
         lat_leak_parts = [re.escape(r) for r, _ in lat_items]
         self._leak_lat_re = re.compile(
-            rf"(?<!{CODE_BOUND})(?:{'|'.join(lat_leak_parts)})(?!{CODE_BOUND})"
+            rf"(?<!{CODE_BOUND})(?:{'|'.join(lat_leak_parts)})(?!{CODE_BOUND})",
+            re.IGNORECASE
         ) if lat_leak_parts else None
 
     # --- проверки ---
@@ -398,14 +414,6 @@ class Anonymizer:
         self._record(mention, fake_value)
         return fake_value
 
-    @staticmethod
-    def _ip_is_public(ip: str) -> bool:
-        o = [int(x) for x in ip.split(".")]
-        if any(x > 255 for x in o):
-            return False
-        return not (o[0] in (0, 10, 127) or (o[0] == 172 and 16 <= o[1] <= 31)
-                    or (o[0] == 192 and o[1] == 168) or (o[0] == 169 and o[1] == 254))
-
     def _fake_ip_repl(self, match: re.Match) -> str:
         """IPv4 -> другой адрес того же класса: приватные остаются приватными,
         публичные уходят в документные RFC 5737."""
@@ -437,7 +445,9 @@ class Anonymizer:
         if not _is_domain_like(d):
             return d  # файл (nginx.conf) или не-домен
         self.stats["domains"] += 1
-        code = hashlib.sha256(d.lower().encode()).hexdigest()[:8]
+        # хеш от точного написания: «Corp.Ru» и «corp.ru» — разные записи,
+        # один фейк на оба делал подстановку необратимой
+        code = hashlib.sha256(d.encode()).hexdigest()[:8]
         labels = d.split(".")
         if len(labels) >= 3:
             fake_value = f"{labels[0]}.{code}.example.com"
@@ -451,7 +461,7 @@ class Anonymizer:
         if not _is_domain_like(d):
             return match.group(0)
         self.stats["domains"] += 1
-        code = hashlib.sha256(d.lower().encode()).hexdigest()[:8]
+        code = hashlib.sha256(d.encode()).hexdigest()[:8]
         labels = d.split(".")
         if len(labels) >= 3:
             fake_value = f"*.{labels[0]}.{code}.example.com"
@@ -470,14 +480,15 @@ class Anonymizer:
         if self._phases:
             (full_re, full_marks, lat_re, lat_marks, ph_re, decode) = self._phases
             if full_re is not None:
-                s = full_re.sub(lambda m: full_marks[m.group(0)], s)
+                s = full_re.sub(
+                    lambda m: full_marks.get(m.group(0).casefold(), m.group(0)), s)
             if lat_re is not None:
                 def lat_lookup(m: re.Match) -> str:
                     key = m.group(0)
                     if key.startswith("@"):
                         key = key[1:]
-                        return "@" + lat_marks.get(key, key)
-                    return lat_marks.get(key, m.group(0))
+                        return "@" + lat_marks.get(key.casefold(), key)
+                    return lat_marks.get(key.casefold(), m.group(0))
                 s = lat_re.sub(lat_lookup, s)
 
         if self.fake:
