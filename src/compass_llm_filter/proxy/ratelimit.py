@@ -34,7 +34,3 @@ class RateLimiter:
                 queue.append(now)
                 return True
             return False
-
-    def reset(self) -> None:
-        with self._lock:
-            self._records.clear()

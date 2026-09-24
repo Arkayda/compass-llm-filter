@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
+import sys
 import time
 import uuid
 from collections import deque
@@ -75,37 +77,142 @@ class RuleInputTooLong(Exception):
     возврат — гарантируть маскировку нельзя, вызов обязан уйти в fail-политику."""
 
 
+class DuplicateRuleError(ValueError):
+    """Правило с таким id уже существует: эндпоинт отображает это в 409 Conflict
+    (наследуем ValueError, чтобы загрузка файла состояния просто пропускала дубли)."""
+
+
 MAX_RULE_INPUT_CHARS = 256 * 1024
+
+
+def _has_nested_quantified_group(pattern: str) -> bool:
+    """Статический сканер структуры: группа, стоящая под квантификатором
+    (+, *, ?, {n,m}), внутри которой лежит другая группа — квантифицированная
+    или содержащая квантификатор внутри себя. Примеры: ((a+)[ab])*,
+    (([а-я]+)[а-я ])* — комбинаторный взрыв возвратов, причём по алфавиту,
+    которого нет в зондах; такие паттерны запрещаем сразу, без прогонов."""
+    n = len(pattern)
+    # (открытие, закрытие, под_квантификатором, есть_квантификатор_внутри)
+    closed: list[tuple[int, int, bool, bool]] = []
+    stack: list[list] = []   # [открытие, под_квантификатором=False, есть_квант_внутри=False]
+    i = 0
+    while i < n:
+        ch = pattern[i]
+        if ch == "\\":                       # экранированный литерал \( \) \[ \+
+            i += 2
+            continue
+        if ch == "[":                        # символьный класс: парены внутри — литералы
+            i += 1
+            if i < n and pattern[i] == "^":
+                i += 1
+            if i < n and pattern[i] == "]":  # ведущий "]" — литерал
+                i += 1
+            while i < n and pattern[i] != "]":
+                i += 2 if pattern[i] == "\\" else 1
+            i += 1
+            continue
+        if ch == "(":
+            stack.append([i, False, False])
+            if i + 1 < n and pattern[i + 1] == "?":
+                i += 1                       # "?": маркер конструкции (?: (?= (?< — не квантификатор
+            i += 1
+            continue
+        if ch == ")" and stack:
+            start, _, hasq = stack.pop()
+            j = i + 1
+            followed = (
+                j < n and pattern[j] in "+*?"              # ленивые/жадные +? *? — всё равно квантификатор
+                or j < n and pattern[j] == "{"
+                and re.fullmatch(r"\{\d+(,\d*)?\}",
+                                 pattern[j:pattern.find("}", j) + 1] or "x")
+            )
+            # любая вложенная группа с квантификатором под внешней
+            # квантифицированной группой — опасная вложенность
+            if followed and any(
+                    start < c_start < c_end < i and (c_followed or c_hasq)
+                    for c_start, c_end, c_followed, c_hasq in closed):
+                return True
+            closed.append((start, i, followed, hasq or followed))
+            i += 1
+            continue
+        if ch in "+*?":
+            for frame in stack:              # квантификатор лежит внутри всех открытых групп
+                frame[2] = True
+        elif ch == "{":
+            k = pattern.find("}", i)
+            if k != -1 and re.fullmatch(r"\{\d+(,\d*)?\}", pattern[i:k + 1]):
+                for frame in stack:
+                    frame[2] = True
+                i = k + 1
+                continue
+        i += 1
+    return False
+
+
+# зондовый прогон выполняется в дочернем процессе: даже прогрев зонда с
+# катастрофическим паттерном никогда не возвращается, watchdog по timeout
+# обязан убить его и отвергнуть паттерн, а не повесить сервис
+_PROBE_SCRIPT = """\
+import json, re, sys, time
+compiled = re.compile(sys.argv[1])
+alphabets = json.loads(sys.argv[2])
+result = []
+for alphabet in alphabets:
+    row = []
+    for n in (20, 60, 200):
+        s = alphabet * n + "!"
+        t0 = time.perf_counter(); compiled.search(s)               # прогрев
+        t1 = time.perf_counter(); compiled.search(s); t2 = time.perf_counter()
+        row.append(t2 - t1)
+    result.append(row)
+print(json.dumps(result))
+"""
+
+# латиница, цифры, пробел и кириллица: без кириллического зонда паттерн вида
+# ^(([а-я]+)[а-я ])*x$ проходил все прогоны и взрывался на первом же русском
+# запросе (непрощупываемый алфавит)
+_PROBE_ALPHABETS = ("a", "1", " ", "а")
+_PROBE_TIMEOUT_S = 3.0
 
 
 def validate_safe_regex(pattern: str) -> None:
     """Защита от ReDoS (catastrophic backtracking): проверка структуры квантификаторов
-    и тестовый прогон на повторяющихся строках."""
+    и тестовый прогон на повторяющихся строках (в дочернем процессе с watchdog)."""
     if not pattern:
         raise ValueError("pattern is required")
     if len(pattern) > 300:
         raise ValueError("pattern too long (max 300 characters)")
     if DANGEROUS_NESTED.search(pattern) or DANGEROUS_ALT.search(pattern):
         raise ValueError("potentially vulnerable regex (nested quantifiers detected)")
+    if _has_nested_quantified_group(pattern):
+        raise ValueError("potentially vulnerable regex (nested quantifiers detected)")
     try:
         compiled = re.compile(pattern)
     except re.error as exc:
         raise ValueError(f"invalid regex: {exc}") from exc
+    del compiled  # компиляция проверена; дочерний процесс компилирует свою
 
-    def timed(s: str) -> float:
-        t0 = time.perf_counter()
-        compiled.search(s)
-        return time.perf_counter() - t0
-
-    # цепочка зондов 20 -> 60 -> 200 по трём алфавитам: короткие ловят быстрые
-    # взрывы, длинные — медленный рост; отношение t(200)/t(20) отсекает
-    # суперлинейные (квадратичные и хуже) паттерны, безобидные на малых зондах
-    for alphabet in ("a", "1", " "):
+    # цепочка зондов 20 -> 60 -> 200 в дочернем процессе: короткие ловят
+    # быстрые взрывы, длинные — медленный рост; отношение t(200)/t(20)
+    # отсекает суперлинейные паттерны, а timeout возвращает управление даже
+    # с паттерна, который не возвращается вовсе
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _PROBE_SCRIPT, pattern, json.dumps(_PROBE_ALPHABETS)],
+            capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("regex execution timeout (catastrophic backtracking risk)") from exc
+    except OSError as exc:
+        raise ValueError(f"regex probe failed to run: {exc}") from exc
+    if proc.returncode != 0:
+        raise ValueError("regex probe crashed (catastrophic backtracking risk)")
+    try:
+        times = json.loads(proc.stdout)
+    except ValueError:
+        raise ValueError("regex probe produced no result (catastrophic backtracking risk)")
+    for row in times:
         base = None
-        for n in (20, 60, 200):
-            s = alphabet * n + "!"
-            timed(s)  # прогрев
-            dt = timed(s)
+        for dt in row:
             if dt > 0.05:
                 raise ValueError("regex execution timeout (catastrophic backtracking risk)")
             if base is None:
@@ -186,12 +293,24 @@ class State:
         # id попадает в DOM консоли (inline-onclick) — только безопасный алфавит
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", rule_id):
             raise ValueError("id must match [A-Za-z0-9_-]{1,64}")
+        if rule_id in self.rules:
+            raise DuplicateRuleError(f"rule id {rule_id!r} already exists")
+        # name/placeholder попадают в словарь подстановок и ответы консоли:
+        # пустой плейсхолдер становился ключом "" в reverse_map и дублировал
+        # оригинал между каждым символом каждого ответа; не-строка ломала
+        # de_anonymize TypeError'ом
+        name = data.get("name") or pattern[:40]
+        if not isinstance(name, str) or not 1 <= len(name) <= 200:
+            raise ValueError("name must be a string of 1..200 characters")
+        placeholder = data.get("placeholder", "[CUSTOM]")
+        if not isinstance(placeholder, str) or not 1 <= len(placeholder) <= 200:
+            raise ValueError("placeholder must be a string of 1..200 characters")
         rule = CustomRule(
             id=rule_id,
-            name=data.get("name") or pattern[:40],
+            name=name,
             pattern=pattern,
             replacement=replacement,
-            placeholder=data.get("placeholder", "[CUSTOM]"),
+            placeholder=placeholder,
             enabled=bool(data.get("enabled", True)),
         )
         self.rules[rule.id] = rule

@@ -18,8 +18,10 @@ import ipaddress
 import json
 import pathlib
 import re
+import socket
 import urllib.parse
 import uuid
+from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request
@@ -31,14 +33,19 @@ from compass_llm_filter.core.validators import set_default_pepper
 from compass_llm_filter.proxy.config import Settings
 from compass_llm_filter.proxy.metrics import Metrics
 from compass_llm_filter.proxy.ratelimit import RateLimiter
-from compass_llm_filter.proxy.rules import (MAX_RULE_INPUT_CHARS, RuleInputTooLong,
-                                            State)
+from compass_llm_filter.proxy.rules import (MAX_RULE_INPUT_CHARS, DuplicateRuleError,
+                                            RuleInputTooLong, State)
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailers", "transfer-encoding", "upgrade", "host",
     "content-length", "content-encoding",
 }
+
+# заголовки, вырезаемые из ЗАПРОСА наверх: content-encoding — end-to-end,
+# не hop-by-hop; сжатое тело клиента мы не перекодируем — заголовок обязан
+# ехать вместе с ним, иначе апстрим получает сломанный запрос
+REQUEST_HOP_BY_HOP = HOP_BY_HOP - {"content-encoding"}
 
 MASKABLE_METHODS = {"POST", "PUT", "PATCH"}
 
@@ -177,6 +184,9 @@ class SSERestorer:
         self.fields: dict[str, _StreamSlot] = {}
         self._dec = codecs.getincrementaldecoder("utf-8")("replace")
         self._buf = ""
+        # event:/id: относятся к СЛЕДУЮЩЕЙ data:-строке; придерживаем их,
+        # чтобы синтетический flush на границе блока не разрывал пару
+        self._pending_fields: list[str] = []
 
     def feed_bytes(self, b: bytes) -> bytes:
         text = self._dec.decode(b)
@@ -190,7 +200,9 @@ class SSERestorer:
             if cr:
                 line = line[:-1]
             out.append(self._feed_line(line) + ("\r\n" if cr else "\n"))
-        return "".join(out).encode("utf-8") if out else b""
+        # errors="replace": одиночные суррогаты (\ud800) из upstream-JSON не
+        # должны ронять поток посреди ответа — они превращаются в U+FFFD
+        return "".join(out).encode("utf-8", errors="replace") if out else b""
 
     def tail(self) -> bytes:
         """Хвост потока: последняя строка без \\n + синтетические события."""
@@ -199,25 +211,38 @@ class SSERestorer:
             return b""
         line, self._buf = self._buf, ""
         result = self._feed_line(line) + "\n" + "".join(self._flush_events())
-        return result.encode("utf-8")
+        return result.encode("utf-8", errors="replace")
 
     def _feed_line(self, line: str) -> str:
-        if not line.startswith("data:") or not line[5:].strip():
-            return line  # комментарии, event:/id:, пустые data:
+        if line.startswith(("event:", "id:")):
+            # придерживаем: emit вместе со своей data:-строкой (см. ниже);
+            # иначе синтетический flush на границе блока вставлялся между
+            # event: и data: и реальное событие теряло имя
+            self._pending_fields.append(line)
+            return ""
+        if not line.startswith("data:"):
+            return line  # комментарии (:), retry:, пустые строки — как раньше
+        buffered = "".join(f + "\n" for f in self._pending_fields)
+        self._pending_fields.clear()
         # по спецификации SSE у значения data убирается РОВНО ОДИН ведущий
         # пробел; .strip() искажал payload с значимыми пробелами
         payload = line[5:]
         if payload.startswith(" "):
             payload = payload[1:]
+        if not payload.strip():  # пустые data: — пара event:/data: сохраняется
+            return buffered + line
         if payload == "[DONE]":
-            # перед DONE — сброс придержнутых хвостов
-            return "".join(self._flush_events()) + line
+            # перед DONE — сброс придержнутых хвостов (синтетика самодостаточна:
+            # свои event:-строки, затем придержанные поля и сама строка DONE)
+            return "".join(self._flush_events()) + buffered + line
         try:
             obj = json.loads(payload)
         except ValueError:
-            return "data: " + self._feed_field("_raw", payload)
+            return buffered + "data: " + self._feed_field("_raw", payload)
         # конец блока/сообщения: продолжения дельты не будет — прижатые
-        # хвосты выпускаем синтетическими событиями до строки-терминатора
+        # хвосты выпускаем синтетическими событиями до строки-терминатора;
+        # синтетика идёт ПЕРЕД придержанной event:-строкой, чтобы каждая
+        # event: осталась соседней со своей data:
         boundary = isinstance(obj, dict) and obj.get("type") in (
             "content_block_stop", "message_stop")
         prefix = "".join(self._flush_events()) if boundary else ""
@@ -225,7 +250,7 @@ class SSERestorer:
         obj = self._walk(obj, (), touched)
         for key in touched:
             self.fields[key].last_obj = obj
-        return prefix + "data: " + json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+        return prefix + buffered + "data: " + json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
 
     def _walk(self, obj, path, touched):
         if isinstance(obj, str):
@@ -374,22 +399,52 @@ def _apply_custom_rules(obj, anon: Anonymizer, state, depth: int = 0):
     return obj
 
 
+# числовые формы хоста, которые ip_address не парсит, а getaddrinfo резолвит
+# в 127.0.0.1: чистый десятичный (2130706433), hex (0x7f000001, 0x7f.0.0.1),
+# усечённая точечная запись (127.1)
+_NUMERIC_HOST_RE = re.compile(r"^(?:0x[0-9a-fA-F.]+|\d+(?:\.\d+){0,2})$")
+
+
+def _ip_is_internal(ip) -> bool:
+    return (ip.is_private or ip.is_loopback or ip.is_link_local
+            or ip.is_reserved or ip.is_unspecified)
+
+
 def _validate_upstream_host(url: str, allow_private: bool) -> None:
     """SSRF-защита: апстрим не должен указывать на внутренние адреса,
-    если это явно не разрешено (локальный мок/dev). Проверяются IP-литералы
-    и localhost; доменные имена не резолвим (DNS-ответ мог бы смениться
-    между проверкой и запросом)."""
+    если это явно не разрешено (локальный мок/dev). Проверяются IP-литералы,
+    localhost, числовые формы вида 127.1/0x7f000001/2130706433 и резолв
+    домена через getaddrinfo при старте (DNS-ответ мог бы смениться между
+    проверкой и запросом — стартовая проверка отсекает очевидные случаи)."""
     if allow_private:
         return
     host = urllib.parse.urlsplit(url).hostname or ""
     if host.lower() == "localhost":
         raise ValueError(f"upstream host {host!r} is internal; set COMPASS_ALLOW_PRIVATE_UPSTREAM=true only for local dev")
+    if _NUMERIC_HOST_RE.match(host):
+        raise ValueError(f"upstream host {host!r} is a numeric address form; set COMPASS_ALLOW_PRIVATE_UPSTREAM=true only for local dev")
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        return  # доменное имя
-    if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified:
-        raise ValueError(f"upstream host {host!r} is an internal IP; set COMPASS_ALLOW_PRIVATE_UPSTREAM=true only for local dev")
+        ip = None
+    if ip is not None:
+        if _ip_is_internal(ip):
+            raise ValueError(f"upstream host {host!r} is an internal IP; set COMPASS_ALLOW_PRIVATE_UPSTREAM=true only for local dev")
+        return  # публичный IP-литерал
+    # доменное имя: резолвим один раз и проверяем каждый возвращённый адрес;
+    # нерезолвящееся имя пропускаем (моки/dev-имена, DNS может подхватиться позже)
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except (socket.gaierror, OSError):
+        return
+    for info in infos:
+        addr = info[4][0].split("%", 1)[0]  # срезаем scope у IPv6 link-local
+        try:
+            aip = ipaddress.ip_address(addr)
+        except ValueError:
+            continue
+        if _ip_is_internal(aip):
+            raise ValueError(f"upstream host {host!r} resolves to internal address {addr}; set COMPASS_ALLOW_PRIVATE_UPSTREAM=true only for local dev")
 
 
 def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport | None = None) -> FastAPI:
@@ -403,7 +458,15 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
     if settings.secret_pepper:
         set_default_pepper(settings.secret_pepper)
 
-    app = FastAPI(title="compass-llm-filter proxy", docs_url=None, redoc_url=None, openapi_url=None)
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        yield
+        # пул соединений апстрима закрывается при остановке сервера — раньше
+        # клиент не закрывался вовсе и соединения утекали
+        await _app.state.compass_client.aclose()
+
+    app = FastAPI(title="compass-llm-filter proxy", docs_url=None, redoc_url=None,
+                  openapi_url=None, lifespan=_lifespan)
     state = State(settings)
     app.state.compass = state
     app.state.compass_metrics = metrics = Metrics()
@@ -415,12 +478,13 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         follow_redirects=False,
     )
 
-    # CSRF-защита для управляющих мутирующих эндпоинтов (/v1/settings, /v1/rules)
+    # CSRF-защита для управляющих мутирующих эндпоинтов (/v1/settings,
+    # /v1/rules, /v1/sandbox)
     @app.middleware("http")
     async def _csrf_protection(request: Request, call_next):
         path = request.url.path
         if request.method in ("POST", "PUT", "PATCH", "DELETE") and (
-            path.startswith("/v1/settings") or path.startswith("/v1/rules")
+            path.startswith(("/v1/settings", "/v1/rules", "/v1/sandbox"))
         ):
             sec_fetch = request.headers.get("sec-fetch-site", "").lower()
             if sec_fetch == "cross-site":
@@ -561,6 +625,8 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
     async def add_rule(body: dict):
         try:
             rule = state.add_rule(body)
+        except DuplicateRuleError as exc:
+            return JSONResponse(status_code=409, content={"detail": str(exc)})
         except ValueError as exc:
             return JSONResponse(status_code=400, content={"detail": str(exc)})
         state.save_state()
@@ -572,7 +638,12 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         if not rule:
             return JSONResponse(status_code=404, content={"detail": "rule not found"})
         if "enabled" in body:
-            rule.enabled = bool(body["enabled"])
+            # строго булево значение: JSON-строка "false" проходила bool()
+            # и включала выключенное правило
+            if not isinstance(body["enabled"], bool):
+                return JSONResponse(status_code=400, content={
+                    "detail": "enabled must be a boolean"})
+            rule.enabled = body["enabled"]
         state.save_state()
         return rule.public()
 
@@ -635,17 +706,34 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
     async def proxy(request: Request, path: str):
         request_id = uuid.uuid4().hex
         # грубый отсев по Content-Length до чтения тела (анти-DoS);
-        # chunked-тела дочитываются и проверяются по факту ниже
+        # тело без честного Content-Length (chunked) читается ограниченно:
+        # как только суммарный размер перевалил за лимит — 413 сразу,
+        # не дочитывая поток злоумышленника целиком
         content_length = request.headers.get("content-length", "")
-        if content_length.isdigit() and int(content_length) > settings.max_body_bytes:
-            return JSONResponse(status_code=413, content={"detail": "body too large"})
-        raw_body = await request.body()
+        if content_length.isdigit():
+            if int(content_length) > settings.max_body_bytes:
+                return JSONResponse(status_code=413, content={"detail": "body too large"})
+            raw_body = await request.body()
+        else:
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > settings.max_body_bytes:
+                    return JSONResponse(status_code=413, content={"detail": "body too large"})
+                chunks.append(chunk)
+            raw_body = b"".join(chunks)
 
         if len(raw_body) > settings.max_body_bytes:
             return JSONResponse(status_code=413, content={"detail": "body too large"})
 
+        # accept-encoding не пересылаем: httpx ставит свой список по фактически
+        # установленным декодерам; ответ мы всегда отдаём распакованным, а
+        # br/zstd от клиента приводили к нечитаемым байтам у клиента
         headers = {k: v for k, v in request.headers.items()
-                   if k.lower() not in HOP_BY_HOP and k.lower() != settings.entities_header}
+                   if k.lower() not in REQUEST_HOP_BY_HOP
+                   and k.lower() != "accept-encoding"
+                   and k.lower() != settings.entities_header}
 
         # сущности из приложения; кривой заголовок -> 400 (fail-closed).
         # ASGI отдаёт заголовки в latin-1, а клиенты шлют UTF-8 — восстанавливаем
@@ -687,15 +775,24 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
                     for k, v in request.query_params.multi_items()
                 ]
                 if any(q_anon.leaks_in_text(v) for _k, v in masked_pairs):
-                    metrics.inc("compass_blocked_total")
-                    state.audit_push(request_id=request_id, path=path, blocked=True,
-                                     reason="leak-check failed (query)",
-                                     injections=list(set(injections)))
-                    if state.fail_mode == "closed":
-                        return JSONResponse(status_code=503, content={
-                            "detail": "compass: anonymization failed, request blocked"})
-                    metrics.inc("compass_failopen_total")
-                    passthrough = True
+                    if state.mode == "enforce":
+                        metrics.inc("compass_blocked_total")
+                        state.audit_push(request_id=request_id, path=path, mode=state.mode,
+                                         blocked=True, reason="leak-check failed (query)",
+                                         injections=list(set(injections)))
+                        if state.fail_mode == "closed":
+                            return JSONResponse(status_code=503, content={
+                                "detail": "compass: anonymization failed, request blocked"})
+                        metrics.inc("compass_failopen_total")
+                        passthrough = True
+                    else:
+                        # detect (shadow) не блокирует: провайдер и так видит
+                        # оригинал; инцидент фиксируем ошибкой маскирования
+                        metrics.inc("compass_mask_errors_total")
+                        state.audit_push(request_id=request_id, path=path, mode=state.mode,
+                                         reason="leak-check failed (detect mode: query passthrough)",
+                                         blocked=False,
+                                         injections=list(set(injections)))
                 else:
                     anon = q_anon
                     if not detect_only:
@@ -703,8 +800,8 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
             except Exception:
                 metrics.inc("compass_mask_errors_total")
                 if state.fail_mode == "closed":
-                    state.audit_push(request_id=request_id, path=path, blocked=True,
-                                     reason="masking error (query)",
+                    state.audit_push(request_id=request_id, path=path, mode=state.mode,
+                                     blocked=True, reason="masking error (query)",
                                      injections=list(set(injections)))
                     return JSONResponse(status_code=503, content={
                         "detail": "compass: masking error, request blocked"})
@@ -712,49 +809,78 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
                 passthrough = True
 
         if request.method in MASKABLE_METHODS and raw_body:
-            try:
-                payload = json.loads(raw_body)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                payload = None
-            if payload is not None:
-                for text in _iter_strings(payload):
-                    if inj := detect_prompt_injection(text):
-                        injections.extend(inj)
-                if injections:
-                    metrics.inc("compass_prompt_injections_total", len(injections))
-                if not passthrough:
-                    try:
-                        if anon is None:
-                            anon = _new_anon()
-                        masked_payload = _apply_custom_rules(
-                            _mask_strings(payload, anon), anon, state)
-                        for text in _iter_strings(masked_payload):
-                            if anon.leaks_in_text(text):
-                                metrics.inc("compass_blocked_total")
-                                state.audit_push(request_id=request_id, path=path, blocked=True,
-                                                 reason="leak-check failed",
+            if "content-encoding" in request.headers and not passthrough:
+                # сжатое тело не раскладывается в JSON — маскировать нельзя:
+                # enforce+closed блокирует (наверх не уезжает незамаскированный
+                # ПДн), detect/fail-open пропускают сырые байты как есть,
+                # content-encoding при них (заголовок больше не вырезается)
+                metrics.inc("compass_mask_errors_total")
+                if state.mode == "enforce" and state.fail_mode == "closed":
+                    state.audit_push(request_id=request_id, path=path, mode=state.mode,
+                                     blocked=True,
+                                     reason="compressed request body cannot be masked",
+                                     injections=list(set(injections)))
+                    return JSONResponse(status_code=503, content={
+                        "detail": "compass: compressed request body cannot be masked, request blocked"})
+                state.audit_push(request_id=request_id, path=path, mode=state.mode,
+                                 blocked=False, reason="compressed body passthrough",
+                                 injections=list(set(injections)))
+            else:
+                try:
+                    payload = json.loads(raw_body)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    payload = None
+                if payload is not None:
+                    for text in _iter_strings(payload):
+                        if inj := detect_prompt_injection(text):
+                            injections.extend(inj)
+                    if injections:
+                        metrics.inc("compass_prompt_injections_total", len(injections))
+                    if not passthrough:
+                        try:
+                            if anon is None:
+                                anon = _new_anon()
+                            masked_payload = _apply_custom_rules(
+                                _mask_strings(payload, anon), anon, state)
+                            for text in _iter_strings(masked_payload):
+                                if anon.leaks_in_text(text):
+                                    if state.mode == "enforce":
+                                        metrics.inc("compass_blocked_total")
+                                        state.audit_push(request_id=request_id, path=path,
+                                                         mode=state.mode, blocked=True,
+                                                         reason="leak-check failed",
+                                                         injections=list(set(injections)))
+                                        if state.fail_mode == "closed":
+                                            return JSONResponse(status_code=503, content={
+                                                "detail": "compass: anonymization failed, request blocked"})
+                                        # fail-open: пропускаем оригинал целиком
+                                        metrics.inc("compass_failopen_total")
+                                        anon = None
+                                        forward_query = None
+                                        break
+                                    # detect (shadow) не блокирует: провайдер и так
+                                    # видит оригинал; инцидент фиксируем ошибкой
+                                    # маскирования, запрос уходит как обычно
+                                    metrics.inc("compass_mask_errors_total")
+                                    state.audit_push(request_id=request_id, path=path,
+                                                     mode=state.mode, blocked=False,
+                                                     reason="leak-check failed (detect mode: passthrough)",
+                                                     injections=list(set(injections)))
+                                    break
+                            if anon is not None and not detect_only:
+                                body_to_send = json.dumps(masked_payload, ensure_ascii=False).encode()
+                        except Exception:
+                            metrics.inc("compass_mask_errors_total")
+                            if state.fail_mode == "closed":
+                                state.audit_push(request_id=request_id, path=path,
+                                                 mode=state.mode, blocked=True,
+                                                 reason="masking error",
                                                  injections=list(set(injections)))
-                                if state.fail_mode == "closed":
-                                    return JSONResponse(status_code=503, content={
-                                        "detail": "compass: anonymization failed, request blocked"})
-                                # fail-open: пропускаем оригинал целиком
-                                metrics.inc("compass_failopen_total")
-                                anon = None
-                                forward_query = None
-                                break
-                        if anon is not None and not detect_only:
-                            body_to_send = json.dumps(masked_payload, ensure_ascii=False).encode()
-                    except Exception:
-                        metrics.inc("compass_mask_errors_total")
-                        if state.fail_mode == "closed":
-                            state.audit_push(request_id=request_id, path=path, blocked=True,
-                                             reason="masking error",
-                                             injections=list(set(injections)))
-                            return JSONResponse(status_code=503, content={
-                                "detail": "compass: masking error, request blocked"})
-                        metrics.inc("compass_failopen_total")
-                        anon = None
-                        forward_query = None
+                                return JSONResponse(status_code=503, content={
+                                    "detail": "compass: masking error, request blocked"})
+                            metrics.inc("compass_failopen_total")
+                            anon = None
+                            forward_query = None
 
         if anon is not None:
             for key, value in anon.stats.items():
@@ -818,8 +944,12 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         content = await upstream_response.aread()
         await upstream_response.aclose()
 
-        # восстановление в обычном (буферизованном) ответе
-        if anon is not None and not detect_only and content:
+        # восстановление в обычном (буферизованном) ответе; анонимайзер без
+        # находок (пустая карта подстановок) оставляет байты нетронутыми —
+        # бинарные ответы (аудио/файлы) не прогоняются через
+        # decode(errors="replace") и не портятся U+FFFD
+        if (anon is not None and not detect_only and content
+                and anon.reverse_map()):
             if "json" in content_type:
                 try:
                     restored = _restore_strings(json.loads(content), anon)

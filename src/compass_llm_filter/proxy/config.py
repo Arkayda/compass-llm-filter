@@ -39,7 +39,10 @@ class Settings:
             anonymization_mode=env.get("COMPASS_ANONYMIZATION_MODE", "fake").strip().lower(),
             host=env.get("COMPASS_HOST", "0.0.0.0"),
             port=int(env.get("COMPASS_PORT", "8080")),
-            metrics_enabled=env.get("COMPASS_METRICS_ENABLED", "true").lower() != "false",
+            # единый набор значений с остальными флагами; незаданная или
+            # пустая переменная — метрики ВКЛЮЧЕНЫ (прежний дефолт)
+            metrics_enabled=(env.get("COMPASS_METRICS_ENABLED") or "true").strip().lower()
+            in ("true", "1", "yes"),
             audit_max_entries=int(env.get("COMPASS_AUDIT_MAX_ENTRIES", "1000")),
             max_body_bytes=int(env.get("COMPASS_MAX_BODY_BYTES", str(10 * 1024 * 1024))),
             entities_header=env.get("COMPASS_ENTITIES_HEADER", "x-compass-entities").lower(),

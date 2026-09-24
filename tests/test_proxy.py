@@ -1094,3 +1094,566 @@ async def test_sandbox_too_long_string_400():
         await client.post("/v1/rules", json={"pattern": "ORD-\\d{6}"})
         resp = await client.post("/v1/sandbox", json={"text": "x" * (300 * 1024)})
         assert resp.status_code == 400
+
+
+# --- ReDoS: обход через непрощупываемые алфавиты и watchdog для зондов ---
+
+def _validate_safe_regex_in_subprocess(pattern: str):
+    """Прогон validate_safe_regex в дочернем процессе с timeout: зависающий
+    паттерн обязан убиваться watchdog'ом, а не вешать набор тестов."""
+    import subprocess
+    import sys
+    import time
+    script = (
+        "import sys\n"
+        "from compass_llm_filter.proxy.rules import validate_safe_regex\n"
+        "try:\n"
+        "    validate_safe_regex(sys.argv[1])\n"
+        "    print('ACCEPTED')\n"
+        "except ValueError as exc:\n"
+        "    print('REJECTED:', exc)\n"
+    )
+    t0 = time.monotonic()
+    proc = subprocess.run([sys.executable, "-c", script, pattern],
+                          capture_output=True, text=True, timeout=10)
+    return proc.stdout.strip(), time.monotonic() - t0
+
+
+def test_redos_cyrillic_alphabet_bypass_rejected():
+    # регресс: паттерн '^(([а-я]+)[а-я ])*x$' взрывается на кириллице, но зонды
+    # из "a"/"1"/" " его не касались — правило принималось и вешало event loop
+    # на первом же русском запросе
+    out, elapsed = _validate_safe_regex_in_subprocess("^(([а-я]+)[а-я ])*x$")
+    assert out.startswith("REJECTED"), out
+    assert elapsed < 2.0
+
+
+def test_redos_nested_quantified_groups_static_rejected():
+    # статический сканер: группа под квантификатором, содержащая другую
+    # квантифицированную группу, запрещена до всяких зондов
+    out, elapsed = _validate_safe_regex_in_subprocess("^((a+)[ab])*x")
+    assert out.startswith("REJECTED"), out
+    assert elapsed < 2.0
+
+
+def test_redos_hang_pattern_post_rules_returns_4xx_not_hang():
+    # регресс: прогревочный зонд выполнялся без ограничений в самом процессе —
+    # POST /v1/rules с таким паттерном вешал весь сервис навсегда. Эндпоинт
+    # проверяем в дочернем процессе: до фикса дочерний зависает и убивается
+    # timeout'ом, после — обязан быстро ответить 4xx
+    import subprocess
+    import sys
+    script = (
+        "import asyncio, json\n"
+        "import httpx\n"
+        "from compass_llm_filter.proxy.app import create_app\n"
+        "from compass_llm_filter.proxy.config import Settings\n"
+        "from httpx import ASGITransport, MockTransport\n"
+        "async def main():\n"
+        "    async def ok(request):\n"
+        "        return httpx.Response(200, json={})\n"
+        "    app = create_app(Settings(upstream_base_url='http://upstream.test',"
+        " audit_max_entries=10),\n"
+        "                     upstream_transport=MockTransport(ok))\n"
+        "    async with httpx.AsyncClient(transport=ASGITransport(app=app),"
+        " base_url='http://t') as client:\n"
+        "        resp = await client.post('/v1/rules',"
+        " json={'pattern': '^((a+)[ab])*x'})\n"
+        "        print(resp.status_code)\n"
+        "asyncio.run(main())\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", script],
+                          capture_output=True, text=True, timeout=20)
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "400"
+
+
+def test_validate_safe_regex_accepts_safe_patterns():
+    # обычные безопасные паттерны по-прежнему проходят валидацию (примечание:
+    # паттерн вида "[a-z]+@[a-z.]+" с соседними квантификаторами отклоняется
+    # таймером роста ещё до этих правок — это прежнее, ожидаемое поведение)
+    from compass_llm_filter.proxy.rules import validate_safe_regex
+    for pattern in (r"ORD-\d{6}", r"\b\d{3}-\d{2}-\d{2}\b", r"Заявка-\d{4}"):
+        validate_safe_regex(pattern)  # не бросает
+
+
+# --- валидация правил: placeholder, name, дубликат id, strict-bool enabled ---
+
+@pytest.mark.asyncio
+async def test_add_rule_placeholder_validated():
+    # регресс: пустой плейсхолдер попадал в reverse_map ключом "" и
+    # de_anonymize дублировал оригинал между каждым символом каждого ответа
+    async with make_client(make_settings(), []) as client:
+        empty = await client.post("/v1/rules", json={"pattern": r"ORD-\d{3}", "placeholder": ""})
+        assert empty.status_code == 400
+        oversized = await client.post("/v1/rules", json={
+            "pattern": r"ORD-\d{3}", "placeholder": "x" * 201})
+        assert oversized.status_code == 400
+        nonstr = await client.post("/v1/rules", json={
+            "pattern": r"ORD-\d{3}", "placeholder": 123})
+        assert nonstr.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_add_rule_name_validated():
+    async with make_client(make_settings(), []) as client:
+        nonstr = await client.post("/v1/rules", json={"pattern": r"ORD-\d{3}", "name": 42})
+        assert nonstr.status_code == 400
+        oversized = await client.post("/v1/rules", json={
+            "pattern": r"ORD-\d{3}", "name": "x" * 201})
+        assert oversized.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_duplicate_rule_id_returns_409():
+    # регресс: повторный POST с тем же id молча перезаписывал правило
+    async with make_client(make_settings(), []) as client:
+        first = await client.post("/v1/rules", json={"id": "ord", "pattern": r"ORD-\d{3}"})
+        assert first.status_code == 200
+        dup = await client.post("/v1/rules", json={"id": "ord", "pattern": r"ORD-\d{4}"})
+        assert dup.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_patch_rule_enabled_requires_bool():
+    # регресс: JSON-строка "false" проходила bool() и ВКЛЮЧАЛА правило
+    async with make_client(make_settings(), []) as client:
+        created = await client.post("/v1/rules", json={"id": "ord", "pattern": r"ORD-\d{3}"})
+        assert created.status_code == 200
+        bad = await client.patch("/v1/rules/ord", json={"enabled": "false"})
+        assert bad.status_code == 400
+        good = await client.patch("/v1/rules/ord", json={"enabled": False})
+        assert good.status_code == 200
+        rules = (await client.get("/v1/rules")).json()["rules"]
+        assert rules[0]["enabled"] is False
+
+
+# --- бинарные ответы не портятся, когда восстанавливать нечего ---
+
+@pytest.mark.asyncio
+async def test_binary_response_not_corrupted_without_pii():
+    # регресс: anon существовал для любого запроса с query или JSON-телом, и
+    # не-JSON ответ всегда прогонялся через decode(errors="replace") — каждый
+    # не-UTF8 байт превращался в U+FFFD, аудио/файлы портились
+    audio = bytes(range(256)) * 8
+
+    async def audio_upstream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=audio, headers={"content-type": "audio/mpeg"})
+
+    app = create_app(make_settings(), upstream_transport=MockTransport(audio_upstream))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        # JSON-тело без ПДн: anon создаётся, но карта подстановок пуста
+        resp = await client.post("/v1/audio/speech",
+                                 json={"input": "скажи привет", "model": "tts-1"})
+        assert resp.status_code == 200
+        assert resp.content == audio
+        # то же с query-параметром (query-конвейер тоже создаёт anon)
+        resp2 = await client.post("/v1/audio/speech?format=mp3",
+                                  json={"input": "text"})
+        assert resp2.status_code == 200
+        assert resp2.content == audio
+
+
+# --- detect (shadow) не блокирует при сбое leak-check ---
+
+def _leaky_anonymizer_patch():
+    """Anonymizer, у которого leak-check всегда срабатывает (масштабируем
+    форс-мажор сбоя leak-check без реальной утечки)."""
+    import compass_llm_filter.proxy.app as app_mod
+
+    original = app_mod.Anonymizer
+
+    class Leaky(original):
+        def leaks_in_text(self, s):
+            return 1
+
+    return app_mod, original, Leaky
+
+
+@pytest.mark.asyncio
+async def test_detect_mode_leak_failure_body_path_passes_through():
+    # регресс: detect + fail_mode=closed (default) возвращал 503 по сбою
+    # leak-check — противоречит семантике shadow-режима: detect не блокирует,
+    # а фиксирует инцидент (blocked=False), метрика — compass_mask_errors_total
+    app_mod, original, Leaky = _leaky_anonymizer_patch()
+    seen = []
+    app_mod.Anonymizer = Leaky
+    try:
+        app = create_app(make_settings(mode="detect"), upstream_transport=echo_upstream(seen))
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://m") as client:
+            resp = await client.post("/chat/completions", json=chat_payload(f"телефон {PHONE}"))
+            assert resp.status_code == 200
+            assert PHONE in seen[0]["body"]["messages"][0]["content"]  # оригинал наверх
+            records = (await client.get("/v1/audit/records")).json()["records"]
+            rec = [r for r in records if "leak-check failed" in r.get("reason", "")][-1]
+            assert rec["blocked"] is False
+            assert rec["mode"] == "detect"
+            assert (await client.get("/metrics")).text.count("compass_blocked_total") == 0
+    finally:
+        app_mod.Anonymizer = original
+
+
+@pytest.mark.asyncio
+async def test_detect_mode_leak_failure_query_path_passes_through():
+    app_mod, original, Leaky = _leaky_anonymizer_patch()
+    seen = []
+
+    def upstream(request):
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json={})
+
+    app_mod.Anonymizer = Leaky
+    try:
+        app = create_app(make_settings(mode="detect"), upstream_transport=MockTransport(upstream))
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+            resp = await client.get("/search", params={"q": f"найди {PHONE}"})
+            assert resp.status_code == 200
+            assert seen[0]["q"] == f"найди {PHONE}"
+            records = (await client.get("/v1/audit/records")).json()["records"]
+            rec = [r for r in records if "leak-check failed" in r.get("reason", "")][-1]
+            assert rec["blocked"] is False
+    finally:
+        app_mod.Anonymizer = original
+
+
+@pytest.mark.asyncio
+async def test_enforce_mode_leak_failure_still_blocks():
+    # симметрия: enforce + fail_mode=closed при том же сбое обязан блокировать
+    app_mod, original, Leaky = _leaky_anonymizer_patch()
+    seen = []
+    app_mod.Anonymizer = Leaky
+    try:
+        app = create_app(make_settings(), upstream_transport=echo_upstream(seen))
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://m") as client:
+            resp = await client.post("/chat/completions", json=chat_payload("текст"))
+            assert resp.status_code == 503
+            assert seen == []
+    finally:
+        app_mod.Anonymizer = original
+
+
+def test_sse_event_line_stays_paired_with_data_across_flush():
+    # регресс: event:/id: уходили наружу сразу, а синтетический flush на
+    # content_block_stop вставлялся МЕЖДУ event:-строкой и её data:-строкой:
+    # реальное событие оставалось без имени, синтетическое получало чужое
+    from compass_llm_filter.proxy.app import SSERestorer
+    anon = Anonymizer()
+    masked = anon.sanitize_string("запрос search.corp.ru")[len("запрос "):]
+    assert masked != "search.corp.ru"  # фейк-домен, хвост "search" придержится
+    r = SSERestorer(anon)
+    out = b""
+    ev = {"type": "content_block_delta", "index": 0,
+          "delta": {"type": "input_json_delta", "partial_json": "запрос "}}
+    out += r.feed_bytes(("event: content_block_delta\ndata: "
+                         + json.dumps(ev, ensure_ascii=False) + "\n\n").encode())
+    out += r.feed_bytes(('event: content_block_delta\ndata: {"type":"content_block_delta",'
+                         '"index":0,"delta":{"type":"input_json_delta",'
+                         '"partial_json":"search"}}\n\n').encode())
+    out += r.feed_bytes(("event: content_block_stop\ndata: "
+                         '{"type":"content_block_stop","index":0}\n\n').encode())
+    out += r.feed_bytes(b"data: [DONE]\n\n")
+    text = out.decode()
+    lines = [l for l in text.split("\n") if l]
+
+    # каждая event:-строка обязана соседствовать со своей data:-строкой
+    for i, line in enumerate(lines):
+        if line.startswith("event:"):
+            assert i + 1 < len(lines) and lines[i + 1].startswith("data:"), (i, lines)
+    # реальное content_block_stop сохранило своё имя (не досталось синтетике)
+    stop_idx = next(i for i, line in enumerate(lines) if line == "event: content_block_stop")
+    assert '"type":"content_block_stop"' in lines[stop_idx + 1]
+    # придержанный хвост сброшен синтетическим событием со своей event:-строкой
+    assert "search" in text
+    assert "data: [DONE]" in text
+
+
+def test_sse_lone_surrogate_does_not_kill_stream():
+    # регресс: upstream-JSON с "\ud800" (одиночный суррогат) ронял поток
+    # UnicodeEncodeError на encode("utf-8") — стрим обрывался посреди ответа
+    from compass_llm_filter.proxy.app import SSERestorer
+    anon = Anonymizer()
+    r = SSERestorer(anon)
+    out = r.feed_bytes(b'data: {"choices":[{"delta":{"content":"\\ud800"}}]}\n\n')
+    assert b"choices" in out
+    out2 = r.feed_bytes(b"data: [DONE]\n\n")
+    assert b"[DONE]" in out2
+
+
+# --- сжатые тела запросов: без тихого обхода маскирования ---
+
+def _gzip_body(text: str) -> bytes:
+    import gzip
+    return gzip.compress(json.dumps(chat_payload(text)).encode())
+
+
+@pytest.mark.asyncio
+async def test_gzip_request_body_fail_closed_503():
+    # регресс: gzip-тело не парсилось в JSON, уходило наверх СЫРЫМ и БЕЗ
+    # content-encoding (заголовок вырезался) — запрос доезжал сломанным и
+    # незамаскированным даже в enforce+closed
+    seen = []
+    app = create_app(make_settings(), upstream_transport=echo_upstream(seen))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        resp = await client.post("/chat/completions", content=_gzip_body(f"телефон {PHONE}"),
+                                 headers={"content-type": "application/json",
+                                          "content-encoding": "gzip"})
+        assert resp.status_code == 503
+        assert seen == []  # наверх не ходили
+
+
+@pytest.mark.asyncio
+async def test_gzip_request_body_fail_open_forwards_raw_with_header():
+    import gzip
+    seen = []
+
+    async def raw_handler(request: httpx.Request) -> httpx.Response:
+        seen.append({"content": request.content, "headers": dict(request.headers)})
+        return httpx.Response(200, json={"ok": True})
+
+    app = create_app(make_settings(fail_mode="open"), upstream_transport=MockTransport(raw_handler))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        body = _gzip_body(f"телефон {PHONE}")
+        resp = await client.post("/chat/completions", content=body,
+                                 headers={"content-type": "application/json",
+                                          "content-encoding": "gzip"})
+        assert resp.status_code == 200
+        assert seen[0]["content"] == body                          # сырые байты не тронуты
+        assert seen[0]["headers"].get("content-encoding") == "gzip"  # заголовок при них
+        assert gzip.decompress(seen[0]["content"])  # и это осмысленный gzip
+        records = (await client.get("/v1/audit/records")).json()["records"]
+        assert any("compressed body passthrough" in r.get("reason", "") for r in records)
+
+
+@pytest.mark.asyncio
+async def test_gzip_request_body_detect_mode_forwards_raw():
+    seen = []
+
+    async def raw_handler(request: httpx.Request) -> httpx.Response:
+        seen.append({"content": request.content, "headers": dict(request.headers)})
+        return httpx.Response(200, json={"ok": True})
+
+    app = create_app(make_settings(mode="detect"), upstream_transport=MockTransport(raw_handler))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        body = _gzip_body(f"телефон {PHONE}")
+        resp = await client.post("/chat/completions", content=body,
+                                 headers={"content-type": "application/json",
+                                          "content-encoding": "gzip"})
+        assert resp.status_code == 200
+        assert seen[0]["content"] == body
+        assert seen[0]["headers"].get("content-encoding") == "gzip"
+
+
+@pytest.mark.asyncio
+async def test_client_accept_encoding_not_forwarded_verbatim():
+    # регресс: accept-encoding клиента уезжал наверх как есть, а ответ прокси
+    # всегда отдаёт распакованным (content-encoding ответа вырезается) —
+    # br/zstd от клиента приводили к нечитаемым байтам у клиента
+    seen = {}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen["ae"] = request.headers.get("accept-encoding")
+        return httpx.Response(200, json={"ok": True})
+
+    app = create_app(make_settings(), upstream_transport=MockTransport(handler))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        resp = await client.post("/chat/completions", json=chat_payload("текст"),
+                                 headers={"accept-encoding": "br, zstd, gzip"})
+        assert resp.status_code == 200
+    ae = (seen.get("ae") or "").lower()
+    assert "br" not in ae and "zstd" not in ae  # httpx ставит свой список декодеров
+
+
+# --- SSRF: числовые формы хостов и резолв домена на приватный адрес ---
+
+def test_ssrf_numeric_host_forms_rejected():
+    # регресс: http://127.1:9, http://0x7f000001:9, http://2130706433:9 —
+    # ip_address их не парсит, а getaddrinfo резолвит в 127.0.0.1
+    from compass_llm_filter.proxy.app import _validate_upstream_host
+    for url in ("http://127.1:9", "http://0x7f000001:9", "http://2130706433:9",
+                "http://0x7f.0.0.1:9", "http://10.1:9"):
+        with pytest.raises(ValueError):
+            _validate_upstream_host(url, allow_private=False)
+    # с явным флагом — можно (локальный мок/dev)
+    _validate_upstream_host("http://127.1:9", allow_private=True)
+
+
+def test_ssrf_dns_name_resolving_to_private_ip_rejected(monkeypatch):
+    # домен, резолвящийся в приватный адрес (пусть и не "localhost" буквально),
+    # обязан блокировать старт без флага
+    import socket as socket_mod
+
+    def fake_getaddrinfo(host, *a, **kw):
+        if host == "evil-dns.test":
+            return [(socket_mod.AF_INET, socket_mod.SOCK_STREAM, 6, "", ("10.6.6.6", 0))]
+        if host == "localhost":
+            return [(socket_mod.AF_INET, socket_mod.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
+        raise socket_mod.gaierror("no such host")
+
+    monkeypatch.setattr(socket_mod, "getaddrinfo", fake_getaddrinfo)
+    with pytest.raises(ValueError):
+        create_app(make_settings(upstream_base_url="http://evil-dns.test:9"))
+    with pytest.raises(ValueError):
+        create_app(make_settings(upstream_base_url="http://localhost:9000"))
+    # нерезолвящееся имя не мешает старту (мок-апстримы в тестах)
+    assert create_app(make_settings(upstream_base_url="http://upstream.test"))
+    # явный флаг разрешает приватный резолв
+    assert create_app(make_settings(upstream_base_url="http://evil-dns.test:9",
+                                    allow_private_upstream=True))
+
+
+@pytest.mark.asyncio
+async def test_csrf_protection_covers_sandbox():
+    # регресс: мутирующий POST /v1/sandbox не был в списке CSRF-защиты —
+    # cross-site Origin получал 200
+    async with make_client(make_settings(), []) as client:
+        r_evil = await client.post("/v1/sandbox", json={"text": "привет"},
+                                   headers={"Origin": "http://evil.com"})
+        assert r_evil.status_code == 403
+        # same-origin по-прежнему работает
+        r_ok = await client.post("/v1/sandbox", json={"text": "привет"},
+                                 headers={"Origin": "http://compass.test"})
+        assert r_ok.status_code == 200
+
+
+# --- chunked-тела: 413 без дочитывания потока целиком ---
+
+@pytest.mark.asyncio
+async def test_chunked_body_over_limit_413_stops_reading():
+    # регресс: тело без content-length дочитывалось ЦЕЛИКОМ до проверки 413;
+    # чтение обязано обрываться сразу за лимитом (анти-DoS)
+    seen = []
+    produced = {"chunks": 0}
+    app = create_app(make_settings(max_body_bytes=1024), upstream_transport=echo_upstream(seen))
+
+    async def body_stream():
+        for _ in range(40):            # 40 x 1КБ >> лимита в 1024 байта
+            produced["chunks"] += 1
+            yield b"x" * 1024
+        produced["finished"] = True
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        resp = await client.post("/chat/completions", content=body_stream(),
+                                 headers={"content-type": "application/json"})
+        assert resp.status_code == 413
+    assert seen == []
+    assert produced["chunks"] <= 3     # поток не дочитан до конца
+    assert "finished" not in produced
+
+
+@pytest.mark.asyncio
+async def test_small_streamed_body_still_works():
+    # обычное streamed-тело укладывается в лимит и маскируется как раньше
+    seen = []
+    app = create_app(make_settings(max_body_bytes=64 * 1024), upstream_transport=echo_upstream(seen))
+
+    async def ok_stream():
+        yield json.dumps(chat_payload(f"телефон {PHONE}")).encode()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        resp = await client.post("/chat/completions", content=ok_stream(),
+                                 headers={"content-type": "application/json"})
+        assert resp.status_code == 200
+    assert PHONE not in seen[0]["body"]["messages"][0]["content"]
+
+
+def test_httpx_client_closed_on_shutdown():
+    # регресс: AsyncClient апстрима никогда не закрывался — пул соединений
+    # утекал при каждой остановке/пересборке приложения
+    from starlette.testclient import TestClient
+
+    app = create_app(make_settings(), upstream_transport=echo_upstream([]))
+    with TestClient(app) as tc:
+        assert tc.get("/healthz").status_code == 200
+        assert not app.state.compass_client.is_closed
+    assert app.state.compass_client.is_closed
+
+
+@pytest.mark.asyncio
+async def test_query_masking_error_audit_has_mode():
+    # регресс: записи аудита из query-путей сбоя не несли поле mode —
+    # в отличие от записей основного конвейера
+    import compass_llm_filter.proxy.app as app_mod
+    original = app_mod.Anonymizer
+
+    class Broken(original):
+        def sanitize_string(self, s):
+            raise RuntimeError("boom")
+
+    app_mod.Anonymizer = Broken
+    try:
+        app = create_app(make_settings(), upstream_transport=MockTransport(
+            lambda request: httpx.Response(200, json={})))
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+            resp = await client.get("/search", params={"q": "текст"})
+            assert resp.status_code == 503
+            records = (await client.get("/v1/audit/records")).json()["records"]
+            rec = [r for r in records if "masking error (query)" in r.get("reason", "")][-1]
+            assert rec["mode"] == "enforce"
+    finally:
+        app_mod.Anonymizer = original
+
+
+def test_metrics_enabled_env_parsing(monkeypatch):
+    # регресс: "0"/"no"/"off" не отключали метрики — парсился только literal
+    # "false"; остальные флаги используют набор true/1/yes — унифицируем.
+    # Дефолт при незаданной/пустой переменной — ВКЛЮЧЕНО
+    monkeypatch.setenv("COMPASS_UPSTREAM_BASE_URL", "http://upstream.test")
+    monkeypatch.setenv("COMPASS_METRICS_ENABLED", "0")
+    s = Settings.from_env()
+    assert s.metrics_enabled is False
+    for off in ("no", "off", "false"):
+        monkeypatch.setenv("COMPASS_METRICS_ENABLED", off)
+        assert Settings.from_env().metrics_enabled is False, off
+    for on in ("1", "yes", "true", "TRUE"):
+        monkeypatch.setenv("COMPASS_METRICS_ENABLED", on)
+        assert Settings.from_env().metrics_enabled is True, on
+    monkeypatch.setenv("COMPASS_METRICS_ENABLED", "")
+    assert Settings.from_env().metrics_enabled is True
+    monkeypatch.delenv("COMPASS_METRICS_ENABLED")
+    assert Settings.from_env().metrics_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_metrics_endpoint_disabled_by_env(monkeypatch):
+    monkeypatch.setenv("COMPASS_UPSTREAM_BASE_URL", "http://upstream.test")
+    monkeypatch.setenv("COMPASS_METRICS_ENABLED", "0")
+    app = create_app(Settings.from_env(), upstream_transport=MockTransport(
+        lambda request: httpx.Response(200, json={})))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        assert (await client.get("/metrics")).status_code == 404
+    monkeypatch.delenv("COMPASS_METRICS_ENABLED")
+    app2 = create_app(Settings.from_env(), upstream_transport=MockTransport(
+        lambda request: httpx.Response(200, json={})))
+    async with AsyncClient(transport=ASGITransport(app=app2), base_url="http://t") as client:
+        assert (await client.get("/metrics")).status_code == 200
+
+
+def test_metrics_render_integral_values_as_plain_int():
+    # регресс: формат :g отдавал 1e+06 для 1_000_000 — парсер консоли
+    # такие значения молча терял
+    from compass_llm_filter.proxy.metrics import Metrics
+    m = Metrics()
+    m.inc("compass_masked_total", 1_000_000, type="phones")
+    out = m.render()
+    assert "1000000" in out
+    assert "1e+06" not in out and "1e6" not in out
+    # дробные значения остаются дробными
+    m2 = Metrics()
+    m2.inc("compass_upstream_errors_total", 0.5)
+    assert "0.5" in m2.render()
+
+
+def test_metrics_render_escapes_label_values():
+    # регресс: кавычка/бэкслеш/перевод строки в значении label ломали
+    # текстовый формат Prometheus (экранируем по спецификации)
+    from compass_llm_filter.proxy.metrics import Metrics
+    m = Metrics()
+    m.inc("compass_masked_total", 1, **{"type": 'a"b\\c\nd'})
+    out = m.render()
+    assert 'type="a\\"b\\\\c\\nd"' in out
+
+
+def test_ratelimiter_has_no_dead_reset_method():
+    # reset() был мёртвым кодом: не вызывался ни из src, ни из тестов —
+    # удалён, чтобы не подразумевать несуществующий контракт очистки
+    assert not hasattr(RateLimiter, "reset")
