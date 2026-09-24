@@ -443,7 +443,7 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         async def _console_auth(request: Request, call_next):
             path = request.url.path
             admin = (
-                path in ("/console", "/logo.svg", "/metrics", "/healthz",
+                path in ("/console", "/console.js", "/logo.svg", "/metrics", "/healthz",
                          "/v1/settings", "/v1/rules", "/v1/audit/records",
                          "/v1/detectors", "/v1/sandbox")
                 or path.startswith("/v1/rules/")
@@ -469,12 +469,14 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
             return await call_next(request)
 
     # HTTP Security Headers на ВСЕ ответы (включая 401/403 от мидлварей выше):
-    # регистрируется последним => выполняется внешним, заголовки попадают и в ошибки
+    # регистрируется последним => выполняется внешним, заголовки попадают и в ошибки.
+    # script-src без 'unsafe-inline': весь JS консоли — внешний файл + делегирование
+    # data-action (style-src оставлен 'unsafe-inline' — инъекция CSS не исполняет код)
     @app.middleware("http")
     async def _security_headers(request: Request, call_next):
         response = await call_next(request)
         response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; "
+            "default-src 'self'; script-src 'self'; "
             "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
             "connect-src 'self'"
         )
@@ -505,12 +507,18 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
         return resp
 
     _console_html = (pathlib.Path(__file__).parent / "console.html").read_text(encoding="utf-8")
+    _console_js = (pathlib.Path(__file__).parent / "console.js").read_text(encoding="utf-8")
     _logo_svg = (pathlib.Path(__file__).parent / "logo.svg").read_bytes()
 
     @app.get("/console", response_class=HTMLResponse)
     async def console():
         # один html-файл, едет внутри пакета
         return HTMLResponse(_console_html)
+
+    @app.get("/console.js")
+    async def console_js():
+        return Response(content=_console_js,
+                        media_type="text/javascript; charset=utf-8")
 
     @app.get("/logo.svg")
     async def logo():

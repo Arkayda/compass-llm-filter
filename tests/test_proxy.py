@@ -969,3 +969,39 @@ def test_ratelimiter_purges_stale_keys():
     _time.sleep(0.35)
     rl.is_allowed("trigger")  # окно истекло — чистка должна сработать
     assert len(rl._records) < 100
+
+
+# --- строгий CSP: без inline-скриптов и onclick-обработчиков ---
+
+def test_console_has_no_inline_scripts_or_handlers():
+    # inline-скрипты и onclick-атрибуты требуют script-src 'unsafe-inline';
+    # консоль обязана обходиться внешним файлом и data-action делегированием
+    import pathlib
+    html = (pathlib.Path(__file__).parent.parent
+            / "src/compass_llm_filter/proxy/console.html").read_text(encoding="utf-8")
+    assert re.search(r"<script(?![^>]*\bsrc=)", html) is None, "есть inline <script>"
+    assert re.search(r"onclick\s*=", html, re.IGNORECASE) is None, "есть inline-обработчики"
+
+
+@pytest.mark.asyncio
+async def test_console_js_served_and_csp_strict_for_scripts():
+    async with make_client(make_settings(), []) as client:
+        js = await client.get("/console.js")
+        assert js.status_code == 200
+        assert "javascript" in js.headers["content-type"]
+        console = await client.get("/console")
+        csp = console.headers.get("content-security-policy", "")
+        assert "script-src 'self'" in csp
+        assert csp.count("unsafe-inline") <= 1  # допустимо только для style-src
+
+
+@pytest.mark.asyncio
+async def test_console_js_protected_by_auth():
+    settings = make_settings(auth_user="compass", auth_password="s3cret")
+
+    async def ok(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True})
+
+    app = create_app(settings, upstream_transport=MockTransport(ok))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://c") as client:
+        assert (await client.get("/console.js")).status_code == 401
