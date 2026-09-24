@@ -16,9 +16,17 @@ import re
 INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     (
         "ignore_instructions",
+        # отрицание (не .../don't .../won't .../do not ...) — не инъекция:
+        # lookbehind-ы фиксированной ширины, «не » — с пробелом
         re.compile(
-            r"\b(?:ignore|disregard|forget|skip)\s+(?:all\s+)?(?:previous|prior|above|former)\s+(?:instructions|rules|directions|prompts|commands)\b|"
-            r"\b(?:забудь|игнорируй|пропусти|отмени)\s+(?:все\s+)?(?:предыдущие|прошлые|вышестоящие|исходные)\s+(?:инструкции|указания|правила|команды)\b",
+            r"(?<!don't )(?<!won't )(?<!do not )"
+            r"\b(?:ignore|disregard|forget|skip)\s+(?:all|any|the|every)?\s*"
+            r"(?:previous|prior|above|former)\s+"
+            r"(?:instructions|rules|directions|prompts|commands)\b"
+            r"|"
+            r"(?<!не )\b(?:забудь|игнорируй|пропусти|отмени)(?:те)?\s+(?:все\s+)?"
+            r"(?:предыдущие|прошлые|вышестоящие|исходные)\s+"
+            r"(?:инструкции|указания|правила|команды)\b",
             re.IGNORECASE,
         ),
     ),
@@ -26,9 +34,9 @@ INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         "system_prompt_leak",
         re.compile(
             r"\b(?:show|print|reveal|repeat|output|display|give)(?:\s+me)?\s+(?:your\s+)?(?:initial|system|original|developer|internal)\s+(?:prompt|instructions|rules|guidelines|configuration)\b|"
-            r"\b(?:what\s+(?:are|were)\s+your\s+(?:original|system|initial|secret)\s+instructions\b)|"
+            r"\b(?:what\s+(?:is|are|was|were)\s+your\s+(?:original|system|initial|secret)\s+(?:instructions|prompts?)\b)|"
             r"\b(?:repeat\s+(?:all\s+)?(?:the\s+)?text\s+above\b)|"
-            r"\b(?:покажи|выведи|напиши|раскрой|повтори)(?:\s+мне)?\s+(?:свой\s+)?(?:системный\s+промпт|начальные\s+инструкции|исходный\s+промпт|системные\s+правила|секретные\s+инструкции)\b|"
+            r"\b(?:покажи|выведи|напиши|раскрой|повтори)(?:те)?(?:\s+мне)?\s+(?:(?:свой|ваш)\s+)?(?:системный\s+промпт|начальные\s+инструкции|исходный\s+промпт|системные\s+правила|секретные\s+инструкции)\b|"
             r"\bповтори\s+текст\s+выше\b",
             re.IGNORECASE,
         ),
@@ -38,6 +46,7 @@ INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         re.compile(
             r"\b(?:DAN\s+mode|Do\s+Anything\s+Now|unfiltered\s+(?:ai|assistant|model|mode)|jailbreak(?:ed)?)\b|"
             r"\b(?:developer|god|unrestricted|sudo)\s+mode\s+(?:enabled|activated|on)\b|"
+            r"\b(?:enable|activate|enter|turn\s+on)\s+(?:developer|god|unrestricted|sudo)\s+mode\b|"
             r"\b(?:bypass|override|disable)\s+(?:all\s+)?(?:safety|content|ethical|security)\s+(?:filters|guidelines|policies|checks|rules)\b|"
             r"\b(?:режим\s+разработчика\s+(?:включен|активирован)|действуй\s+без\s+(?:цензуры|ограничений|фильтров)|ты\s+теперь\s+без\s+ограничений)\b",
             re.IGNORECASE,

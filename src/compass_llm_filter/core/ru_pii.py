@@ -16,8 +16,11 @@ from compass_llm_filter.core.validators import (
     snils_check_digits, snils_ok,
 )
 
-# (?<!\d)/(?!\d) — не отрывать куски от более длинных цифровых цепочек
-RE_CARD = re.compile(r"(?<!\d)\d{4}(?:[ \-]?\d{4}){3}(?!\d)")
+# (?<!\d)/(?!\d) — не отрывать куски от более длинных цифровых цепочек.
+# Кандидат карты — цепочка цифр 12–19 знаков: группы разделены пробелами или
+# дефисами (в т.ч. двойными пробелами); длина и сумма Луна проверяются в
+# _card_ok, не прошедших кандидат возвращаем тексту
+RE_CARD = re.compile(r"(?<!\d)\d+(?:[ \-]+\d+)*(?!\d)")
 RE_SNILS = re.compile(r"(?<!\d)\d{3}(?:[ \-]?\d{3})(?:[ \-]?\d{3})(?:[ \-]?\d{2})(?!\d)")
 RE_OGRNIP = re.compile(r"(?<!\d)\d{15}(?!\d)")
 RE_OGRN = re.compile(r"(?<!\d)\d{13}(?!\d)")
@@ -47,9 +50,16 @@ def _alnum_of(raw: str) -> str:
     return "".join(ch for ch in raw if ch.isalnum()).upper()
 
 
+def _card_ok(digits: str) -> bool:
+    """Карта: по ISO/IEC 7812 длина 12–19 цифр, сумма Луна сходится."""
+    return 12 <= len(digits) <= 19 and luhn_ok(digits)
+
+
 def fake_card(original: str, digits: str) -> str:
+    """Фейк-карта той же длины (12–19) с валидной суммой Луна."""
+    n = len(digits)
     rng = det_rng("card", digits)
-    prefix = "4" + "".join(rng.choice("0123456789") for _ in range(14))
+    prefix = "4" + "".join(rng.choice("0123456789") for _ in range(n - 2))
     return _keep_layout(original, prefix + luhn_check_digit(prefix))
 
 
@@ -89,9 +99,14 @@ def fake_ogrnip(original: str, digits: str) -> str:
 
 
 def fake_number(original: str, digits: str) -> str:
-    """Паспорт: суммы нет, просто другие цифры той же длины."""
-    rng = det_rng("passport", digits)
-    fake = "".join(rng.choice("0123456789") for _ in digits)
+    """Паспорт: суммы нет, просто другие цифры той же длины; при случайном
+    совпадении с оригиналом — ретрай (как у fake_digits)."""
+    fake = digits
+    for attempt in range(64):
+        rng = det_rng("passport", digits, attempt)
+        fake = "".join(rng.choice("0123456789") for _ in digits)
+        if fake != digits:
+            break
     return _keep_layout(original, fake)
 
 
@@ -107,7 +122,7 @@ def fake_iban(original: str, compact: str) -> str:
 
 # (стат-ключ, regex, экстрактор кандидата, валидатор, генератор фейка, плейсхолдер)
 RULES = [
-    ("cards", RE_CARD, _digits_of, luhn_ok, fake_card, "[CARD]"),
+    ("cards", RE_CARD, _digits_of, _card_ok, fake_card, "[CARD]"),
     ("snils", RE_SNILS, _digits_of, snils_ok, fake_snils, "[SNILS]"),
     ("ogrnips", RE_OGRNIP, _digits_of, ogrn_ok, fake_ogrnip, "[OGRNIP]"),
     ("ogrns", RE_OGRN, _digits_of, ogrn_ok, fake_ogrn, "[OGRN]"),
@@ -131,6 +146,14 @@ def _iban_best_prefix(original: str, validate) -> str | None:
     return None
 
 
+def _is_emitted_fake(candidate: str, emitted) -> bool:
+    """Кандидат — фейк, вставленный в текст ранней фазой (или его часть):
+    например, хвост 3-3-3-2 разделённого пробелами фейка телефона или фейк
+    карты, чьи цифры случайно прошли чужую контрольную сумму. Повторная
+    замена подменяла бы фейк другим фейком и ломала обратную подстановку."""
+    return any(candidate in fake for fake in emitted)
+
+
 def apply(s: str, anon, only: tuple = (), skip: tuple = (), mark_late: bool = False) -> str:
     """Прогнать текст по правилам идентификаторов.
 
@@ -141,9 +164,13 @@ def apply(s: str, anon, only: tuple = (), skip: tuple = (), mark_late: bool = Fa
     for stat_key, regex, extract, validate, make_fake, placeholder in RULES:
         if only and stat_key not in only or stat_key in skip:
             continue
+        # фейки, уже подставленные ранними фазами этого же вызова, не трогаем
+        emitted = getattr(anon, "_emitted_fakes", None) or ()
 
         def repl(m: re.Match, _x=extract, _v=validate, _f=make_fake,
                  _p=placeholder, _k=stat_key) -> str:
+            if emitted and _is_emitted_fake(m.group(0), emitted):
+                return m.group(0)
             if _k == "passports_ctx":
                 prefix = m.group(1)
                 original = m.group(2)

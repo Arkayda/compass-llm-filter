@@ -207,6 +207,140 @@ def test_iban_max_length_34_masked():
     assert anon.de_anonymize(cleaned) == f"счёт {full} подтверждён"
 
 
+def test_phone_fake_with_ogrn_checksum_not_remasked():
+    # регресс: телефонная фаза подставляет фейк ДО фазы ru_pii; если цифры
+    # фейка случайно проходят контрольную сумму ОГРН (~1/11), ru_pii маскирует
+    # фейк повторно — обратная подстановка возвращает промежуточный фейк
+    anon = Anonymizer()
+    text = "перезвоните 7000000000009"
+    cleaned = anon.sanitize_string(text)
+    assert anon.stats["phones"] == 1
+    assert anon.stats["ogrns"] == 0
+    assert anon.de_anonymize(cleaned) == text
+
+
+def test_phone_fake_with_snils_checksum_not_remasked():
+    # то же для СНИЛС (~1/100): 11-значный фейк телефона со сошедшейся суммой
+    anon = Anonymizer()
+    text = "мой номер 70000000075"
+    cleaned = anon.sanitize_string(text)
+    assert anon.stats["phones"] == 1
+    assert anon.stats["snils"] == 0
+    assert anon.de_anonymize(cleaned) == text
+
+
+def test_spaced_phone_fake_tail_not_remasked_as_snils():
+    # разделённый пробелами фейк: RE_SNILS матчит его хвост 3-3-3-2 («102 997
+    # 048 65» без «+4 ») — равенство с фейком недостаточно, проверять надо
+    # и вхождение кандидата в уже вставленный фейк
+    anon = Anonymizer()
+    text = "тел +7 000 000 001 50"
+    cleaned = anon.sanitize_string(text)
+    assert anon.stats["phones"] == 1
+    assert anon.stats["snils"] == 0
+    assert anon.de_anonymize(cleaned) == text
+
+
+def test_real_identifiers_still_masked_alongside_phone_fakes():
+    # фикс «не маскировать фейки повторно» не должен задеть настоящие
+    # СНИЛС/ИНН/ОГРН в том же тексте
+    anon = Anonymizer()
+    text = ("тел 7000000000009, СНИЛС 123-456-789-64, ИНН 7707083893, "
+            "ОГРН 1027700132195")
+    cleaned = anon.sanitize_string(text)
+    assert anon.stats["snils"] == 1
+    assert anon.stats["inns"] == 1
+    assert anon.stats["ogrns"] == 1
+    assert anon.stats["phones"] == 1
+    for real in ("123-456-789-64", "7707083893", "1027700132195", "7000000000009"):
+        assert real not in cleaned
+    assert anon.de_anonymize(cleaned) == text
+
+
+def test_card_15_and_19_digits_masked():
+    # регресс: кандидат карты был жёстко 16-значным (4 группы по 4) —
+    # 15-значный Amex и 19-значные карты с валидным Луном утекали
+    for text, card in [
+        ("карта 378282246310005", "378282246310005"),          # Amex, 15
+        ("карта 4444444444444444442", "4444444444444444442"),  # 19 цифр
+    ]:
+        anon = Anonymizer()
+        cleaned = anon.sanitize_string(text)
+        assert card not in cleaned
+        assert anon.stats["cards"] == 1
+        fake_digits_val = _digits(re.search(r"\d{12,19}", cleaned).group(0))
+        assert luhn_ok(fake_digits_val) and len(fake_digits_val) == len(card)
+        assert anon.de_anonymize(cleaned) == text
+
+
+def test_card_double_space_groups_masked():
+    # группы, разведённые двойными пробелами, тоже карта
+    text = "карта 4111  1111  1111  1111"
+    anon = Anonymizer()
+    cleaned = anon.sanitize_string(text)
+    assert "4111  1111" not in cleaned
+    assert anon.stats["cards"] == 1
+    assert anon.de_anonymize(cleaned) == text
+
+
+def test_card_long_numbers_with_bad_luhn_untouched():
+    # номера заказов 12+ цифр без валидного Луна картой не являются
+    text = "заказы 1234567890123456789 и 1234567890123456"
+    anon = Anonymizer()
+    cleaned = anon.sanitize_string(text)
+    assert "1234567890123456789" in cleaned
+    assert "1234567890123456" in cleaned
+    assert anon.stats["cards"] == 0
+    assert anon.de_anonymize(cleaned) == text
+
+
+def test_phone_fake_with_valid_luhn_not_card_masked():
+    # композиция с защитой фейков: фейк телефона 4403351104825 сам проходит
+    # Луна (13 цифр) — расширенная карта-фаза обязана его пропустить
+    text = "тел 7000000001009"
+    anon = Anonymizer()
+    cleaned = anon.sanitize_string(text)
+    assert anon.stats["phones"] == 1
+    assert anon.stats["cards"] == 0
+    assert anon.de_anonymize(cleaned) == text
+
+
+def test_fake_number_retries_on_forced_collision(monkeypatch):
+    # фейк паспорта обязан перегенерироваться, если «случайно» совпал с
+    # оригиналом (как это делает fake_digits); совпадение подforced-но
+    # подменным ГПСЧ — натуральный подбор строки-близнеца невозможен
+    import random
+
+    from compass_llm_filter.core import ru_pii
+    from compass_llm_filter.core.validators import det_rng
+
+    digits = "4509123456"
+    calls = {"n": 0}
+
+    class ForcedRng(random.Random):
+        def __init__(self, forced: str):
+            super().__init__()
+            self._forced, self._i = forced, 0
+
+        def choice(self, seq):
+            ch = self._forced[self._i % len(self._forced)]
+            self._i += 1
+            return ch
+
+    real_rng = det_rng
+
+    def fake_det_rng(*parts, **kw):
+        calls["n"] += 1
+        if len(parts) == 3 and parts[:2] == ("passport", digits) and parts[2] == 0:
+            return ForcedRng(digits)  # первая попытка «выдала» оригинал
+        return real_rng(*parts, **kw)
+
+    monkeypatch.setattr(ru_pii, "det_rng", fake_det_rng)
+    fake = ru_pii.fake_number(digits, digits)
+    assert "".join(c for c in fake if c.isdigit()) != digits
+    assert calls["n"] >= 2  # был ретрай
+
+
 def test_fake_snils_valid_when_control_number_is_100():
     # взвешенная сумма с остатком 100 (mod 101): контрольного числа «100» не
     # существует, фейк обязан перегенерироваться с валидной суммой

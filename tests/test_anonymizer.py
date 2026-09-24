@@ -230,6 +230,80 @@ def test_ipv6_masked_and_restored():
     assert "fe80::1ff:fe23:4567:890a" in restored
 
 
+def test_ipv6_detector_leaves_cpp_and_sql_syntax():
+    # регресс: «::» в C++/SQL даёт кандидатов вида «d::»/«a::da» — формально
+    # валидные IPv6, но мусор; в текст сплайсился фейковый адрес
+    for text in ("используйте std::vector<std::string> и std::make_unique",
+                 "SELECT created_at::date, id::text FROM t"):
+        anon = Anonymizer(mode="fake")
+        cleaned = anon.sanitize_string(text)
+        assert cleaned == text
+        assert anon.stats["ips"] == 0
+
+
+def test_ipv6_short_forms_still_masked_and_times_mac_untouched():
+    anon = Anonymizer(mode="fake")
+    text = "адреса fe80::1 и 2001:db8::625d, время 12:30:45, MAC aa:bb:cc:dd:ee:ff"
+    cleaned = anon.sanitize_string(text)
+    assert "fe80::1" not in cleaned
+    assert "2001:db8::625d" not in cleaned
+    assert "12:30:45" in cleaned      # время — не адрес
+    assert "aa:bb:cc:dd:ee:ff" in cleaned  # MAC-адрес не трогаем
+    assert anon.stats["ips"] == 2
+    assert anon.leaks_in_text(cleaned) == 0
+    assert anon.de_anonymize(cleaned) == text
+
+
+def test_package_version_not_treated_as_email():
+    # регресс: «npm install express@4.18.2» маскировалось как e-mail —
+    # в домене из одних цифр и точек нет ни одной буквы
+    anon = Anonymizer(mode="fake")
+    text = "запустите npm install express@4.18.2 и log4j@2.20.0"
+    cleaned = anon.sanitize_string(text)
+    assert cleaned == text
+    assert anon.stats["emails"] == 0
+    assert anon.leaks_in_text(cleaned) == 0
+
+
+def test_normal_email_still_masked_after_version_guard():
+    anon = Anonymizer(mode="fake")
+    cleaned = anon.sanitize_string("почта user.sname@romashka.ru")
+    assert "user.sname@romashka.ru" not in cleaned
+    assert "example." in cleaned  # фейковый домен из example.com/org/net
+    assert anon.stats["emails"] == 1
+
+
+def test_phone_candidate_does_not_join_digits_across_newline():
+    # регресс: \s в классе разделителей склеивал цифры через \n — «заказ 5» и
+    # номер на следующей строке становились ОДНИМ фейком, перелезающим строку
+    anon = Anonymizer()
+    text = "заказ 5\n91234567890 в работе"
+    cleaned = anon.sanitize_string(text)
+    assert cleaned.split("\n")[0] == "заказ 5"
+    for real, fake in anon._substitutions:
+        assert "\n" not in fake
+    assert anon.de_anonymize(cleaned) == text
+
+
+def test_phone_with_parens_and_spaces_still_masked():
+    for frag in ("+7 912 345-67-89", "(912) 345-67-89"):
+        anon = Anonymizer()
+        cleaned = anon.sanitize_string("тел " + frag)
+        assert frag not in cleaned
+        assert anon.stats["phones"] == 1
+        assert anon.de_anonymize(cleaned) == "тел " + frag
+
+
+def test_stats_counts_name_substitutions():
+    # регресс: stats['names'] никогда не инкрементировался — метрика
+    # compass_masked_total{type="names"} не видела имена
+    anon = Anonymizer(mode="fake")
+    anon.register_entity("ООО Ромашка", kind="org")
+    anon.register_entity("Иван Иванов")
+    anon.sanitize_string("Иван Иванов из ООО Ромашка и снова Иван Иванов")
+    assert anon.stats["names"] == 3
+
+
 def test_leak_check_ignores_guarded_path_context():
     # "crontab.cron" в тексте маскируется как домен, но такой же кандидат
     # внутри пути файла ("sh/cron/crontab.cron") доменный детектор

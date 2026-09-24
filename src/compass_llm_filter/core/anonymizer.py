@@ -23,7 +23,9 @@ RE_LINK = re.compile(r"(?:https?://|www\.|t\.me/)[^\s,;)\]}\u00bb\"'<>]+", re.IG
 # конвейер на минуты; на семантику не влияет (левый матч и так начинается
 # с начала слова)
 RE_EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w-]+\.[\w.-]+")
-RE_PHONE_CANDIDATE = re.compile(r"\+?\d[\d\s\-()]{8,}\d")
+# разделители номера: только пробел/дефис/скобки — \s склеивал цифры через
+# \n/\t («заказ 5\n91234567890» становился одним «телефоном» на две строки)
+RE_PHONE_CANDIDATE = re.compile(r"\+?\d[\d \-()]{8,}\d")
 RE_MENTION = re.compile(r"(?<![\w.@-])@[A-Za-z0-9_]{3,}")
 # (?!\.\d+\.): tcpdump пишет адрес с портом через точку (5.141.102.236.30039) —
 # матчится IP, порт остаётся; заодно отсекаются цепочки вида 1.2.3.4.5.6
@@ -145,6 +147,12 @@ def _is_domain_like(d: str) -> bool:
     return 2 <= len(tld) <= 14 and tld.isalpha() and tld.lower() not in FILE_EXTS
 
 
+def _is_email_like(addr: str) -> bool:
+    """В домене после «@» есть хотя бы одна буква: «express@4.18.2»
+    (пакет@версия из npm/pip) — не почта, домен из цифр и точек."""
+    return any(ch.isalpha() for ch in addr.partition("@")[2])
+
+
 class Anonymizer:
     """Обезличивание строк + обратная подстановка по накопленной карте.
 
@@ -163,6 +171,10 @@ class Anonymizer:
         self._used_aliases: set[str] = set()
         self._substitutions: list[tuple[str, str]] = []  # (реальное, фейковое)
         self._secret_values: list[str] = []  # фейки секретов текущего sanitize_string
+        # фейки, уже вставленные в текст текущего вызова sanitize_string:
+        # поздние фазы не должны маскировать их повторно (подмена фейка фейком
+        # ломает обратную подстановку)
+        self._emitted_fakes: set[str] = set()
         self._phases = None
         self._leak_re = None
         self._leak_lat_re = None
@@ -201,6 +213,7 @@ class Anonymizer:
 
     def _record(self, real: str, fake_value: str) -> None:
         self._substitutions.append((real, fake_value))
+        self._emitted_fakes.add(fake_value)
 
     def _secret_mark(self, fake_value: str) -> str:
         """Секрет -> маркер \x00s_nonce_N\x00, фейк подставится в конце
@@ -394,6 +407,8 @@ class Anonymizer:
 
     def _fake_email_repl(self, match: re.Match) -> str:
         addr = match.group(0)
+        if not _is_email_like(addr):
+            return addr  # пакет@версия (express@4.18.2) — не почта
         local, _, _domain = addr.partition("@")
         rng = _det_rng("email", addr)
         letters = "abcdefghjkmnpqrstuvwxyz"
@@ -401,6 +416,7 @@ class Anonymizer:
         fake_local = rng.choice(letters) + "".join(rng.choice(alpha) for _ in local[1:])
         fake_value = f"{fake_local}@{rng.choice(FAKE_DOMAINS)}"
         self._record(addr, fake_value)
+        self.stats["emails"] += 1
         return fake_value
 
     def _fake_link_repl(self, match: re.Match) -> str:
@@ -479,20 +495,34 @@ class Anonymizer:
         if "\x00" in s:
             s = s.replace("\x00", "")
         self._secret_values = []  # маркеры секретов живут в рамках одного вызова
+        self._emitted_fakes = set()  # фейки текущего вызова (см. __init__)
         if self._phases is None:
             self.prepare()
         if self._phases:
             (full_re, full_marks, lat_re, lat_marks, ph_re, decode) = self._phases
             if full_re is not None:
-                s = full_re.sub(
-                    lambda m: full_marks.get(m.group(0).casefold(), m.group(0)), s)
+                def full_lookup(m: re.Match) -> str:
+                    alias = full_marks.get(m.group(0).casefold())
+                    if alias is None:
+                        return m.group(0)
+                    self.stats["names"] += 1
+                    return alias
+                s = full_re.sub(full_lookup, s)
             if lat_re is not None:
                 def lat_lookup(m: re.Match) -> str:
                     key = m.group(0)
                     if key.startswith("@"):
                         key = key[1:]
-                        return "@" + lat_marks.get(key.casefold(), key)
-                    return lat_marks.get(key.casefold(), m.group(0))
+                        alias = lat_marks.get(key.casefold())
+                        if alias is None:
+                            return m.group(0)
+                        self.stats["names"] += 1
+                        return "@" + alias
+                    alias = lat_marks.get(key.casefold())
+                    if alias is None:
+                        return m.group(0)
+                    self.stats["names"] += 1
+                    return alias
                 s = lat_re.sub(lat_lookup, s)
 
         if self.fake:
@@ -518,9 +548,15 @@ class Anonymizer:
                     return tok
                 return repl
 
-            repl_email, repl_link, repl_mention = (
-                _token("[EMAIL]"), _token("[LINK]"), _token("[MENTION]")
-            )
+            def repl_email(m: re.Match) -> str:
+                addr = m.group(0)
+                if not _is_email_like(addr):
+                    return addr  # пакет@версия — не почта
+                self._record(addr, "[EMAIL]")
+                self.stats["emails"] += 1
+                return "[EMAIL]"
+
+            repl_link, repl_mention = _token("[LINK]"), _token("[MENTION]")
 
             def repl_wildcard(m: re.Match) -> str:
                 if not _is_domain_like(m.group(0)[2:]):
@@ -545,7 +581,7 @@ class Anonymizer:
         # секреты после ссылок: URL с ключом фейкуется целиком, отдельные
         # ключи ловит каталог секретов
         s = secrets.apply(s, self)
-        s, n = RE_EMAIL.subn(repl_email, s); self.stats["emails"] += n
+        s = RE_EMAIL.sub(repl_email, s)  # счётчик ведёт repl (м.б. пропуск)
         s, n = RE_MENTION.subn(repl_mention, s); self.stats["mentions"] += n
         s = RE_WILDCARD_DOMAIN.sub(repl_wildcard, s)  # счётчик ведёт repl
         s = RE_DOMAIN.sub(repl_domain, s)  # счётчик ведёт repl
@@ -561,6 +597,13 @@ class Anonymizer:
         def repl_ipv6(m: re.Match) -> str:
             cand = m.group(1)
             if cand.count(":") < 2:
+                return cand
+            # «::» в C++/SQL (std::vector, id::text) даёт коротких кандидатов
+            # вида «d::»/«a::da»: формально это валидные IPv6, но мусор.
+            # Требуем минимум две непустые hex-группы и разумную длину;
+            # время «12:30:45» и MAC-адреса отсекаются ниже, на разборе адреса
+            groups = [g for g in cand.split(":") if g]
+            if len(groups) < 2 or len(cand) < 7:
                 return cand
             try:
                 ip = ipaddress.IPv6Address(cand)

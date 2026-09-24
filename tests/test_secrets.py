@@ -135,6 +135,152 @@ def test_url_with_key_inside_faked_as_link():
     assert "example.com/" in cleaned  # фейковая ссылка
 
 
+def test_kv_secret_prose_value_not_masked():
+    # регресс: kv-правило заменяло прозаические значения — «token:
+    # authentication failed for user» терял слово «authentication»
+    anon = Anonymizer()
+    text = "token: authentication failed for user"
+    cleaned = anon.sanitize_string(text)
+    assert cleaned == text
+    assert anon.stats["secrets"] == 0
+
+
+def test_kv_secret_values_with_digits_still_masked():
+    # у настоящих секретов почти всегда есть цифра или спецсимвол
+    anon = Anonymizer()
+    text = "config: api_key=supersecretvalue123 и password=hunter2password22"
+    cleaned = anon.sanitize_string(text)
+    assert "supersecretvalue123" not in cleaned
+    assert "hunter2password22" not in cleaned
+    assert "api_key=" in cleaned
+    assert anon.de_anonymize(cleaned) == text
+
+
+def test_secret_fakes_keep_prefix_and_separators():
+    # регресс: фейки не сохраняли форму — AKIA/AIza теряли префикс, JWT/GLM
+    # теряли точки, telegram-ключ двоеточие (вопреки заявлению докстринга)
+    google_key = "AIza" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6"
+    glm_key = "0123456789abcdef0123456789abcdef.FakePassw0rd17"
+    tg_key = "123456789:AAHdy7654321abcdefghij0123456789_"
+    anon = Anonymizer()
+    cleaned = anon.sanitize_string(f"ключи {AWS_KEY} {google_key} {glm_key} {tg_key}")
+    assert cleaned.count("AKIA") == 1   # префикс AWS сохранён
+    assert cleaned.count("AIza") == 1   # префикс Google сохранён
+    assert cleaned.count(".") == 1      # точка GLM-ключа на месте
+    assert cleaned.count(":") == 1      # двоеточие telegram-ключа на месте
+    assert anon.stats["secrets"] == 4
+    restored = anon.de_anonymize(cleaned)
+    for real in (AWS_KEY, google_key, glm_key, tg_key):
+        assert real in restored
+
+
+def test_private_key_header_fake_keeps_shape():
+    header = "-----BEGIN RSA PRIVATE KEY-----"
+    anon = Anonymizer()
+    cleaned = anon.sanitize_string(header)
+    assert header not in cleaned
+    assert "PRIVATE" not in cleaned
+    # каркас блока: ведущие/замыкающие дефисы сохранены
+    assert cleaned.startswith("-----") and cleaned.endswith("-----")
+    assert anon.de_anonymize(cleaned) == header
+
+
+def test_slack_xoxe_token_masked():
+    token = "xoxe-123456789012-1234567890123-abcdefABCDEF1234567890ab"
+    anon = Anonymizer()
+    cleaned = anon.sanitize_string(f"слак-токен {token}")
+    assert token not in cleaned
+    assert anon.stats["secrets"] == 1
+    assert anon.de_anonymize(cleaned) == f"слак-токен {token}"
+
+
+def test_bearer_case_insensitive():
+    token = "abcdefghijklmnopqrstuvwxyz123456"
+    anon = Anonymizer()
+    cleaned = anon.sanitize_string(f"Authorization: BEARER {token}")
+    assert token not in cleaned
+    assert "BEARER " in cleaned  # метка сохранена
+    assert anon.de_anonymize(cleaned) == f"Authorization: BEARER {token}"
+
+
+def test_kv_label_suffixes_masked():
+    # SECRET_KEY= / secret_key= / client_secret= / api_key_id= — хвост
+    # «_слово» после метки раньше не матчился из-за \b перед «=»
+    for label in ("SECRET_KEY", "secret_key", "client_secret", "api_key_id"):
+        value = "supersecretvalue123"
+        anon = Anonymizer()
+        cleaned = anon.sanitize_string(f"{label}={value}")
+        assert value not in cleaned
+        assert label in cleaned
+        assert anon.de_anonymize(cleaned) == f"{label}={value}"
+
+
+def test_sk_dash_words_without_digits_not_secret():
+    # «sk-warehouse-certified-professional» — сертификат, а не ключ OpenAI
+    text = "сертификация sk-warehouse-certified-professional пройдена"
+    anon = Anonymizer()
+    cleaned = anon.sanitize_string(text)
+    assert cleaned == text
+    assert anon.stats["secrets"] == 0
+
+
+def test_conn_string_private_host_fakes_keep_class():
+    # регресс: _fake_host не знал про 127.0.0.0/8 и 169.254.0.0/16 — loopback
+    # и link-local хосты получали публичный фейк, в отличие от bare-IP фазы
+    conns = {
+        "postgres://u:secretpw1@127.0.0.1:5432/db": r"@127\.\d+\.\d+\.\d+:",
+        "metadata://user:pass12345@169.254.169.254/latest": r"@169\.254\.\d+\.\d+",
+    }
+    for conn, fake_re in conns.items():
+        anon = Anonymizer()
+        cleaned = anon.sanitize_string(conn)
+        assert re.search(fake_re, cleaned), cleaned
+        assert anon.de_anonymize(cleaned) == conn
+
+
+def test_conn_string_scheme_not_quadratic():
+    # регресс: жадная схема [a-z][a-z0-9+.-]*:// откатывалась посимвольно с
+    # каждой буквы длинного «a.a.a...» — O(n^2), 16k повторов давали секунды
+    import time
+    anon = Anonymizer()
+    text = "t " + "a." * 20000 + " конец"
+    t0 = time.perf_counter()
+    anon.sanitize_string(text)
+    dt = time.perf_counter() - t0
+    assert dt < 1.0, f"маскировка строки подключения нелинейна: {dt:.2f}s"
+
+
+def test_conn_string_bare_label_host_masked():
+    # регресс: хост из одной метки (localhost/redis) не попадал в
+    # alternation хоста — строка подключения уходила в LLM целиком, не
+    # маскируясь (и leak-check молчал)
+    conns = [
+        "mysql://root:Sup3rS3cretPw@localhost:3306/db",
+        "redis://cache:MyRedisPassw0rd@redis:6379/0",
+    ]
+    for conn in conns:
+        anon = Anonymizer()
+        cleaned = anon.sanitize_string(conn)
+        assert "Sup3rS3cretPw" not in cleaned
+        assert "MyRedisPassw0rd" not in cleaned
+        assert "@localhost" not in cleaned and "@redis:" not in cleaned
+        assert anon.leaks_in_text(cleaned) == 0
+        assert anon.de_anonymize(cleaned) == conn
+
+
+def test_conn_string_marker_password_not_corrupted():
+    # регресс: пароль, уже заменённый sk--правилом на внутренний маркер \x00,
+    # целиком съедался классом пароля conn_string — в карту подстановок
+    # попадал сам маркер, и обратная подстановка возвращала мусор
+    conn = "postgres://u:sk-abcdef1234567890gh@db.corp.ru:5432/x"
+    anon = Anonymizer()
+    cleaned = anon.sanitize_string(conn)
+    assert "sk-abcdef1234567890gh" not in cleaned
+    assert "db.corp.ru" not in cleaned
+    assert anon.stats["secrets"] == 2  # sk-ключ + хост
+    assert anon.de_anonymize(cleaned) == conn
+
+
 def test_conn_string_with_ip_and_ipv6():
     anon = Anonymizer()
     # Строка подключения с IPv4 адресом
