@@ -323,6 +323,27 @@ class SSERestorer:
 MAX_RECURSION_DEPTH = 30
 
 
+def _force_thinking_off(payload, models: frozenset[str]) -> bool:
+    """Скоростная политика: перечисленные модели НИКОГДА не рассуждают.
+
+    GLM через Anthropic-совместимый API думает по умолчанию, а claude-code
+    дополнительно шлёт thinking:{"type":"adaptive"} — оба пути съедают 90%
+    генерации скоростного сценария (замер 2026-09-25: голый вызов 6.1с с
+    thinking против 2.3с без). Поэтому для моделей списка перезаписываем
+    ЛЮБОЙ thinking (включая явный adaptive/enabled от claude-code). Режим
+    «размышление» в хелпеске идёт другой моделью — в список не попадает.
+    Возвращает True, если тело изменено."""
+    if not models or not isinstance(payload, dict):
+        return False
+    model = payload.get("model")
+    if not isinstance(model, str) or model not in models:
+        return False
+    if payload.get("thinking") == {"type": "disabled"}:
+        return False
+    payload["thinking"] = {"type": "disabled"}
+    return True
+
+
 def _depth_exceeds(obj, limit: int = MAX_RECURSION_DEPTH) -> bool:
     """Есть ли в JSON строки/контейнеры глубже лимита конвейера маскирования.
 
@@ -876,6 +897,8 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
                                      reason=f"{unmaskable_reason} (passthrough)",
                                      injections=list(set(injections)))
                 if payload is not None:
+                    if _force_thinking_off(payload, state.disable_thinking_models):
+                        metrics.inc("compass_thinking_disabled_total")
                     for text in _iter_strings(payload):
                         if inj := detect_prompt_injection(text):
                             injections.extend(inj)

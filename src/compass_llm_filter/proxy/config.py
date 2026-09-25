@@ -8,6 +8,11 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+# Дефолт политики скорости (см. Settings.disable_thinking_models): на уровне
+# модуля, чтобы и поле, и from_env использовали одно значение — from_env не
+# должен перебивать дефолт поля пустой строкой.
+_DISABLE_THINKING_DEFAULT = "glm-5.3-flash"
+
 
 @dataclass
 class Settings:
@@ -28,6 +33,12 @@ class Settings:
     secret_pepper: str = ""          # серверная соль ГПСЧ для защиты от rainbow-table подбора
     strict_auth: bool = False        # требовать обязательную настройку basic-auth при старте
     allow_private_upstream: bool = False  # разрешить внутренние IP апстрима (локальный мок/dev)
+    # Модели, для которых прокси принудительно ставит thinking:disabled, если
+    # вызывающий не запросил thinking явно. GLM через Anthropic-совместимый API
+    # рассуждает по умолчанию: 6.1с против 2.3с на голом вызове (замер
+    # 2026-09-25), а в ответах агента 90% генерации — размышления. Список через
+    # запятую; пусто = ничего не менять.
+    disable_thinking_models: str = _DISABLE_THINKING_DEFAULT
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -54,6 +65,8 @@ class Settings:
             strict_auth=env.get("COMPASS_STRICT_AUTH", "false").lower() in ("true", "1", "yes"),
             allow_private_upstream=env.get("COMPASS_ALLOW_PRIVATE_UPSTREAM", "false").lower()
             in ("true", "1", "yes"),
+            disable_thinking_models=env.get("COMPASS_DISABLE_THINKING_MODELS",
+                                            _DISABLE_THINKING_DEFAULT),
         )
         if s.mode not in ("enforce", "detect"):
             raise ValueError(f"COMPASS_MODE must be enforce|detect, got {s.mode!r}")

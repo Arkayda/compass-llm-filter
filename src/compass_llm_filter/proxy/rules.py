@@ -239,6 +239,10 @@ class State:
         self.mode = settings.mode
         self.fail_mode = settings.fail_mode
         self.anonymization_mode = settings.anonymization_mode
+        # frozenset для O(1)-проверки на каждый запрос
+        self.disable_thinking_models = frozenset(
+            m.strip() for m in settings.disable_thinking_models.split(",") if m.strip()
+        )
         self.rules: dict[str, CustomRule] = {}
         self.audit: deque[dict] = deque(maxlen=settings.audit_max_entries)
         if settings.custom_rules_file:
