@@ -207,7 +207,11 @@ async def test_healthz():
 
 
 @pytest.mark.asyncio
-async def test_non_json_body_passthrough():
+async def test_non_json_body_blocked_in_enforce_closed():
+    """Бинарное тело нечем маскировать: enforce+closed блокирует (единый
+    инвариант «не смогли гарантированно замаскировать — не пропускаем», тот же,
+    что у сжатых тел). Passthrough с аудитом остался в detect/fail-open —
+    см. test_audit_fixes.test_binary_body_passthrough_audited_in_detect."""
     seen = []
 
     def raw_transport():
@@ -221,8 +225,8 @@ async def test_non_json_body_passthrough():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://m") as client:
         resp = await client.post("/embeddings", content=b"\x00\x01binary",
                                  headers={"content-type": "application/octet-stream"})
-    assert resp.status_code == 200 and resp.content == b"pong"
-    assert seen[0] == b"\x00\x01binary"                        # не тронуто
+    assert resp.status_code == 503
+    assert seen == []                                           # наверх не ушло
 
 
 @pytest.mark.asyncio

@@ -47,8 +47,6 @@ HOP_BY_HOP = {
 # ехать вместе с ним, иначе апстрим получает сломанный запрос
 REQUEST_HOP_BY_HOP = HOP_BY_HOP - {"content-encoding"}
 
-MASKABLE_METHODS = {"POST", "PUT", "PATCH"}
-
 # каталог встроенных детекторов: (ключ статистики, название, пример, пояснение)
 DETECTORS = [
     ("names", "Имена, фамилии, ники, организации", "Иванов Пётр, @ivanov_petrov, ООО Ромашка",
@@ -323,6 +321,31 @@ class SSERestorer:
 
 
 MAX_RECURSION_DEPTH = 30
+
+
+def _depth_exceeds(obj, limit: int = MAX_RECURSION_DEPTH) -> bool:
+    """Есть ли в JSON строки/контейнеры глубже лимита конвейера маскирования.
+
+    _mask_strings и _iter_strings останавливаются на MAX_RECURSION_DEPTH и
+    молча возвращают содержимое как есть — глубже лимита ПДн уходит наверх
+    незамаскированным и невидимым для leak-check. Итеративный обход (без
+    рекурсии) с ранним выходом: глубже limit интересуют только строки и
+    контейнеры — скаляры без текста ПДн не несут."""
+    stack = [(obj, 0)]
+    while stack:
+        cur, d = stack.pop()
+        if isinstance(cur, str):
+            if d > limit:
+                return True
+        elif isinstance(cur, dict):
+            if d > limit:
+                return True
+            stack.extend((v, d + 1) for v in cur.values())
+        elif isinstance(cur, list):
+            if d > limit:
+                return True
+            stack.extend((v, d + 1) for v in cur)
+    return False
 
 
 def _unique_key(res: dict, key) -> str:
@@ -808,7 +831,9 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
                 metrics.inc("compass_failopen_total")
                 passthrough = True
 
-        if request.method in MASKABLE_METHODS and raw_body:
+        # Тело ЛЮБОГО метода несёт ПДн (DELETE /v1/files с JSON-телом, GET с
+        # телом поиска) — маскируем всё, что парсится как JSON
+        if raw_body:
             if "content-encoding" in request.headers and not passthrough:
                 # сжатое тело не раскладывается в JSON — маскировать нельзя:
                 # enforce+closed блокирует (наверх не уезжает незамаскированный
@@ -826,10 +851,30 @@ def create_app(settings: Settings, upstream_transport: httpx.AsyncBaseTransport 
                                  blocked=False, reason="compressed body passthrough",
                                  injections=list(set(injections)))
             else:
+                payload = None
+                unmaskable_reason: str | None = None
                 try:
                     payload = json.loads(raw_body)
                 except (json.JSONDecodeError, UnicodeDecodeError):
+                    unmaskable_reason = "unparseable request body (not JSON)"
+                if payload is not None and _depth_exceeds(payload):
+                    unmaskable_reason = "JSON depth exceeds maskable limit"
                     payload = None
+                if unmaskable_reason and not passthrough:
+                    # Единый инвариант границы (как у сжатых тел): не смогли
+                    # гарантированно замаскировать — enforce+closed блокирует,
+                    # остальное фиксируем в аудите и пропускаем
+                    metrics.inc("compass_mask_errors_total")
+                    if state.mode == "enforce" and state.fail_mode == "closed":
+                        state.audit_push(request_id=request_id, path=path, mode=state.mode,
+                                         blocked=True, reason=unmaskable_reason,
+                                         injections=list(set(injections)))
+                        return JSONResponse(status_code=503, content={
+                            "detail": f"compass: {unmaskable_reason}, request blocked"})
+                    state.audit_push(request_id=request_id, path=path, mode=state.mode,
+                                     blocked=False,
+                                     reason=f"{unmaskable_reason} (passthrough)",
+                                     injections=list(set(injections)))
                 if payload is not None:
                     for text in _iter_strings(payload):
                         if inj := detect_prompt_injection(text):

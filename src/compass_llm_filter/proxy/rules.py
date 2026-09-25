@@ -168,10 +168,11 @@ for alphabet in alphabets:
 print(json.dumps(result))
 """
 
-# латиница, цифры, пробел и кириллица: без кириллического зонда паттерн вида
-# ^(([а-я]+)[а-я ])*x$ проходил все прогоны и взрывался на первом же русском
-# запросе (непрощупываемый алфавит)
-_PROBE_ALPHABETS = ("a", "1", " ", "а")
+# латиница, цифры, пробел и кириллица — и СМЕШАННЫЕ повторы: паттерн вида
+# ((a|a)b)+c не взрывается ни на одном односимвольном алфавите (нет пары
+# «a»+«b»), но на «ababab…» даёт экспоненту 2^n. Без смешанных зондов такой
+# паттерн проходил валидацию и вешал применение правила в event loop.
+_PROBE_ALPHABETS = ("a", "1", " ", "а", "ab", "a1", "10", "1a")
 _PROBE_TIMEOUT_S = 3.0
 
 
@@ -215,8 +216,11 @@ def validate_safe_regex(pattern: str) -> None:
         for dt in row:
             if dt > 0.05:
                 raise ValueError("regex execution timeout (catastrophic backtracking risk)")
+            # пол базы 100мкс: на реальном суперлинейном росте dt(200) уходит
+            # за миллисекунды и легко превышает x50, а шум таймера на
+            # микросекундных прогонах ложных срабатываний не даёт
             if base is None:
-                base = max(dt, 1e-6)
+                base = max(dt, 1e-4)
             elif dt / base > 50:
                 raise ValueError("superlinear regex growth (catastrophic backtracking risk)")
 
