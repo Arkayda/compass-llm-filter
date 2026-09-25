@@ -10,6 +10,7 @@
 """
 import json
 
+import httpx
 import pytest
 from httpx import ASGITransport, AsyncClient, MockTransport
 
@@ -37,11 +38,11 @@ def raw_upstream(seen: list, reply_json: bool = True):
             payload = json.loads(request.content)
             last_user = next((m.get("content", "") for m in reversed(payload.get("messages", []))
                               if m.get("role") == "user"), "")
-            return __import__("httpx").Response(200, json={
+            return httpx.Response(200, json={
                 "choices": [{"message": {"role": "assistant", "content": f"Эхо: {last_user}"}}],
             })
-        return __import__("httpx").Response(200, content=b"pong",
-                                            headers={"content-type": "text/plain"})
+        return httpx.Response(200, content=b"pong",
+                              headers={"content-type": "text/plain"})
     return MockTransport(handler)
 
 
